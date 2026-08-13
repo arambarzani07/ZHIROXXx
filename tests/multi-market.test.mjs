@@ -40,6 +40,10 @@ test("reserves market creation and manager permissions for the platform owner", 
   ]);
   assert.match(platformStore, /requirePlatformOwner/);
   assert.match(platformStore, /pos_platform_owners/);
+  assert.match(platformStore, /PLATFORM_OWNER_SINGLETON_LOCKED/);
+  assert.match(platformStore, /PLATFORM_OWNER_IDENTITY_LOCKED/);
+  assert.match(platformStore, /PLATFORM_OWNER_PERMANENT/);
+  assert.match(platformStore, /DELETE FROM pos_market_memberships WHERE actor_id/);
   assert.match(platformStore, /role, active, created_at, updated_at/);
   assert.match(platformStore, /'manager'/);
   assert.match(platformRoute, /createPlatformMarket/);
