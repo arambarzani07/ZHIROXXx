@@ -1,6 +1,6 @@
 import type { SyncStoreName } from "@/lib/sync-contract";
 
-export const POS_APP_VERSION = 25;
+export const POS_APP_VERSION = 26;
 
 export type PosRole = "owner" | "manager" | "cashier" | "accountant";
 export type ManagerPermission =
