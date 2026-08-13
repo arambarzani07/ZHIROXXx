@@ -29,6 +29,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .barcode-inspection.warning { color: #8c5b0a; border-color: #edd9ae; background: #fff9ec; }
 .barcode-inspection span { display: flex; align-items: center; gap: 10px; font-size: 11px; }
 .barcode-inspection b { font-size: 12px; }
+.scan-notice { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.scan-notice button { border: 1px solid currentColor; border-radius: 8px; padding: 7px 10px; display: inline-flex; align-items: center; gap: 6px; color: inherit; background: transparent; cursor: pointer; font-size: 10px; font-weight: 700; }
 
 .pos-shell { min-height: 100vh; }
 
