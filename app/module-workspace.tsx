@@ -109,6 +109,7 @@ const emptyData: DashboardData = {
 };
 
 const numberFormatter = new Intl.NumberFormat("ckb-IQ", { maximumFractionDigits: 3 });
+const PENDING_PRODUCT_BARCODE_KEY = "zhirox.pending-product-barcode";
 
 function money(value: number) {
   return `${numberFormatter.format(value || 0)} د.ع`;
@@ -238,6 +239,8 @@ function parseProductsCsv(source: string): Product[] {
   const saleColumn = column("نرخیفرۆشتن", "saleprice", "salepriceiqd", "price");
   const stockColumn = column("كۆگا", "کۆگا", "stock", "quantity");
   const lowColumn = column("ئاگاداریکەمبوو", "ئاگاداریكەمبوو", "lowstock", "minimumstock");
+  const brandColumn = column("براند", "brand", "brandname");
+  const categoryColumn = column("پۆل", "جۆر", "category", "department");
   if (barcodeColumn < 0 || nameColumn < 0) throw new Error("سەردێڕی بارکۆد و ناو لە فایلەکەدا پێویستن");
   const now = new Date().toISOString();
   const seen = new Set<string>();
@@ -255,6 +258,8 @@ function parseProductsCsv(source: string): Product[] {
     };
     return {
       id: createId("product"), barcode, name,
+      brand: brandColumn >= 0 ? (values[brandColumn] ?? "").trim() : "",
+      category: categoryColumn >= 0 ? (values[categoryColumn] ?? "").trim() : "",
       unit: unitColumn >= 0 && values[unitColumn]?.trim() ? values[unitColumn].trim() : "دانە",
       purchasePriceIQD: numberAt(purchaseColumn), salePriceIQD: numberAt(saleColumn),
       stock: numberAt(stockColumn), lowStock: numberAt(lowColumn, 5),
@@ -495,7 +500,13 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [csvPreview, setCsvPreview] = useState<{ filename: string; products: Product[]; newCount: number; updateCount: number } | null>(null);
   const csvInput = useRef<HTMLInputElement>(null);
-  const filteredRows = data.products.filter((item) => `${item.name} ${item.barcode}`.toLowerCase().includes(search.toLowerCase()));
+  const [pendingBarcode, setPendingBarcode] = useState(() => typeof window === "undefined" ? "" : sessionStorage.getItem(PENDING_PRODUCT_BARCODE_KEY) ?? "");
+  useEffect(() => {
+    if (!pendingBarcode) return;
+    sessionStorage.removeItem(PENDING_PRODUCT_BARCODE_KEY);
+    queueMicrotask(() => setFormOpen(true));
+  }, [pendingBarcode, setFormOpen]);
+  const filteredRows = data.products.filter((item) => `${item.name} ${item.barcode} ${item.brand ?? ""} ${item.category ?? ""}`.toLowerCase().includes(search.toLowerCase()));
   const rows = filteredRows.slice(0, 250);
   async function submit(event: FormEvent<HTMLFormElement>, existing: Product | null) {
     event.preventDefault();
@@ -503,7 +514,7 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
     const barcode = normalizeBarcodeInput(String(form.get("barcode") ?? ""));
     const name = String(form.get("name") ?? "").trim();
     const now = new Date().toISOString();
-    const product: Product = { id: existing?.id ?? createId("product"), barcode, name, unit: String(form.get("unit") ?? "دانە"), purchasePriceIQD: Number(form.get("purchasePrice") ?? 0), salePriceIQD: Number(form.get("salePrice") ?? 0), stock: Number(form.get("stock") ?? 0), lowStock: Number(form.get("lowStock") ?? 0), createdAt: existing?.createdAt ?? now, updatedAt: now };
+    const product: Product = { id: existing?.id ?? createId("product"), barcode, name, brand: String(form.get("brand") ?? "").trim(), category: String(form.get("category") ?? "").trim(), unit: String(form.get("unit") ?? "دانە"), purchasePriceIQD: Number(form.get("purchasePrice") ?? 0), salePriceIQD: Number(form.get("salePrice") ?? 0), stock: Number(form.get("stock") ?? 0), lowStock: Number(form.get("lowStock") ?? 0), createdAt: existing?.createdAt ?? now, updatedAt: now };
     const saved = await mutate(async () => {
       if (!name || !barcode) throw new Error("ناو و بارکۆد پێویستن");
       const inspection = inspectBarcode(barcode);
@@ -515,8 +526,8 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
   }
 
   function exportProductsCsv() {
-    const header = ["بارکۆد", "ناو", "یەکە", "نرخی کڕین", "نرخی فرۆشتن", "کۆگا", "ئاگاداری کەمبوو"];
-    const lines = [header, ...data.products.map((product) => [product.barcode, product.name, product.unit, product.purchasePriceIQD, product.salePriceIQD, product.stock, product.lowStock])];
+    const header = ["بارکۆد", "ناو", "براند", "پۆل", "یەکە", "نرخی کڕین", "نرخی فرۆشتن", "کۆگا", "ئاگاداری کەمبوو"];
+    const lines = [header, ...data.products.map((product) => [product.barcode, product.name, product.brand ?? "", product.category ?? "", product.unit, product.purchasePriceIQD, product.salePriceIQD, product.stock, product.lowStock])];
     downloadTextFile(`zhirox-products-${localDateKey(new Date())}.csv`, `\uFEFF${lines.map((line) => line.map(csvCell).join(",")).join("\r\n")}`, "text/csv;charset=utf-8");
   }
 
@@ -542,14 +553,14 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
     <Toolbar title="کاڵاکان" description="ناو، بارکۆد، نرخ و هێنانی کۆمەڵەکالا" search={search} setSearch={setSearch} action={<div className="inline-actions"><input ref={csvInput} hidden type="file" accept="text/csv,.csv" onChange={(event) => void readCsv(event.target.files?.[0])} /><button className="secondary-action" type="button" onClick={() => csvInput.current?.click()}><Upload size={16} />هێنانی CSV</button><button className="secondary-action" type="button" onClick={exportProductsCsv}><Download size={16} />دەرکردنی CSV</button><button className="toolbar-primary" type="button" onClick={() => setFormOpen(true)}><Plus size={17} />کالای نوێ</button></div>} />
     {filteredRows.length > rows.length && <p className="result-limit">لە {numberFormatter.format(filteredRows.length)} ئەنجام، یەکەم {numberFormatter.format(rows.length)} کالا پیشان دەدرێت؛ بۆ کالای دیاریکراو گەڕان بەکاربهێنە.</p>}
     {!rows.length ? <EmptyState icon={<PackagePlus size={40} />} title="هیچ کالایەک نییە" text="یەکەم کالا و بارکۆدەکەی زیاد بکە؛ داتای ساختە دانانرێت." /> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>بارکۆد</th><th>ناو</th><th>یەکە</th><th>کڕین</th><th>فرۆشتن</th><th>کۆگا</th><th>کردار</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td dir="ltr">{item.barcode}</td><td><strong>{item.name}</strong></td><td>{item.unit}</td><td>{money(item.purchasePriceIQD)}</td><td>{money(item.salePriceIQD)}</td><td><span className={item.stock <= item.lowStock ? "stock-badge low" : "stock-badge"}>{numberFormatter.format(item.stock)}</span></td><td><button className="table-action" type="button" onClick={() => setEditingProduct(item)}><Pencil size={14} />دەستکاری</button></td></tr>)}</tbody></table></div>}
-    {formOpen && <Modal title="زیادکردنی کالای نوێ" onClose={() => setFormOpen(false)}><ProductForm product={null} onSubmit={(event) => void submit(event, null)} onCancel={() => setFormOpen(false)} /></Modal>}
+    {formOpen && <Modal title="زیادکردنی کالای نوێ" onClose={() => { setFormOpen(false); setPendingBarcode(""); }}><ProductForm product={null} initialBarcode={pendingBarcode} onSubmit={(event) => void submit(event, null)} onCancel={() => { setFormOpen(false); setPendingBarcode(""); }} /></Modal>}
     {editingProduct && <Modal title={`دەستکاری ${editingProduct.name}`} onClose={() => setEditingProduct(null)}><ProductForm product={editingProduct} onSubmit={(event) => void submit(event, editingProduct)} onCancel={() => setEditingProduct(null)} /></Modal>}
     {csvPreview && <Modal wide title="پێداچوونەوەی هێنانی CSV" onClose={() => setCsvPreview(null)}><div className="csv-preview"><div className="csv-summary"><div><span>فایل</span><strong dir="ltr">{csvPreview.filename}</strong></div><div><span>کالای نوێ</span><strong>{numberFormatter.format(csvPreview.newCount)}</strong></div><div><span>نوێکردنەوە</span><strong>{numberFormatter.format(csvPreview.updateCount)}</strong></div><div><span>کۆی گشتی</span><strong>{numberFormatter.format(csvPreview.products.length)}</strong></div></div><p className="settings-hint"><AlertTriangle size={17} />بارکۆدی هەبوو نوێ دەکرێتەوە و نرخ و بڕی کۆگاکەی بە نرخی فایلەکە دەگۆڕێت.</p><div className="data-table-wrap"><table className="data-table"><thead><tr><th>بارکۆد</th><th>ناو</th><th>یەکە</th><th>کڕین</th><th>فرۆشتن</th><th>کۆگا</th></tr></thead><tbody>{csvPreview.products.slice(0, 10).map((product) => <tr key={product.barcode}><td dir="ltr">{product.barcode}</td><td><strong>{product.name}</strong></td><td>{product.unit}</td><td>{money(product.purchasePriceIQD)}</td><td>{money(product.salePriceIQD)}</td><td>{numberFormatter.format(product.stock)}</td></tr>)}</tbody></table></div>{csvPreview.products.length > 10 && <small className="csv-more">+ {numberFormatter.format(csvPreview.products.length - 10)} کالای تر</small>}<div className="form-actions"><button className="secondary-action" type="button" onClick={() => setCsvPreview(null)}>پاشگەزبوونەوە</button><button className="primary-action" type="button" onClick={() => void confirmImport()}><Check size={17} />پەسەندکردنی هێنان</button></div></div></Modal>}
   </>;
 }
 
-function ProductForm({ product, onSubmit, onCancel }: { product: Product | null; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCancel: () => void }) {
-  const [barcode, setBarcode] = useState(product?.barcode ?? "");
+function ProductForm({ product, initialBarcode = "", onSubmit, onCancel }: { product: Product | null; initialBarcode?: string; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCancel: () => void }) {
+  const [barcode, setBarcode] = useState(product?.barcode ?? initialBarcode);
   const inspection = barcode ? inspectBarcode(barcode) : null;
   return <form className="record-form" onSubmit={onSubmit}><Field label="بارکۆد"><input name="barcode" required autoFocus inputMode="numeric" dir="ltr" value={barcode} onChange={(event) => setBarcode(event.target.value)} /></Field>{inspection && <p className={`barcode-inspection field-wide ${inspection.valid ? "valid" : "warning"}`}><ScanBarcode size={17} /><span><b dir="ltr">{inspection.normalized || "—"}</b>{inspection.message}</span></p>}<Field label="ناوی کالا"><input name="name" required defaultValue={product?.name} /></Field><Field label="یەکە"><select name="unit" defaultValue={product?.unit ?? "دانە"}><option>دانە</option><option>کارتۆن</option><option>کیلۆ</option><option>مەتر</option><option>پاکەت</option></select></Field><Field label={product ? "بڕی ئێستای کۆگا" : "بڕی سەرەتایی"}>{product ? <><input value={product.stock} disabled /><input name="stock" type="hidden" value={product.stock} /></> : <input name="stock" type="number" min="0" step="0.001" defaultValue="0" />}</Field><Field label="نرخی کڕین"><input name="purchasePrice" type="number" min="0" defaultValue={product?.purchasePriceIQD ?? 0} /></Field><Field label="نرخی فرۆشتن"><input name="salePrice" type="number" min="0" defaultValue={product?.salePriceIQD ?? 0} /></Field><Field label="ئاگاداری کەمبوو"><input name="lowStock" type="number" min="0" step="0.001" defaultValue={product?.lowStock ?? 5} /></Field>{product && <p className="settings-hint field-wide"><AlertTriangle size={17} />بۆ زیاد یان کەمکردنی بڕ، بەشی کۆگا بەکاربهێنە تا مێژووی جووڵەکە بپارێزرێت.</p>}<div className="form-actions"><button className="secondary-action" type="button" onClick={onCancel}>پاشگەزبوونەوە</button><SubmitButton>{product ? "نوێکردنەوە" : "تۆمارکردن"}</SubmitButton></div></form>;
 }
@@ -682,7 +693,7 @@ function Cashier({ data, mutate, onNavigate }: { data: DashboardData; mutate: Mu
   const [discountMode, setDiscountMode] = useState<"amount" | "percent">("amount");
   const [discountValue, setDiscountValue] = useState("");
   const [lastSale, setLastSale] = useState<Sale | null>(null);
-  const [scanNotice, setScanNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [scanNotice, setScanNotice] = useState<{ kind: "ok" | "error"; text: string; missingBarcode?: string } | null>(null);
   const operator = currentOperator();
   const shiftOpen = data.cashShifts.some((shift) =>
     shift.status === "open" && (shift.deviceId ? shift.deviceId === data.syncMeta.deviceId : shift.operatorId === operator.id),
@@ -752,7 +763,7 @@ function Cashier({ data, mutate, onNavigate }: { data: DashboardData; mutate: Mu
     }
 
     if (!product) {
-      setScanNotice({ kind: "error", text: `بارکۆدی ${raw} نەدۆزرایەوە` });
+      setScanNotice({ kind: "error", text: `بارکۆدی ${raw} نەدۆزرایەوە`, missingBarcode: raw });
       return;
     }
     if (quantity <= 0 || (cart[product.id] ?? 0) + quantity > product.stock) {
@@ -789,7 +800,7 @@ function Cashier({ data, mutate, onNavigate }: { data: DashboardData; mutate: Mu
     <Toolbar title="کاشێر" description="بارکۆد بسکەنە یان بە ناوی کالا بگەڕێ" />
     <CashShiftBar data={data} mutate={mutate} />
     <div className="cashier-layout">
-      <section className="product-picker"><form className="cashier-search" onSubmit={scan}><ScanBarcode size={19} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="بارکۆد بسکەنە و Enter بکە..." dir="auto" /><button type="submit">زیادکردن</button></form>{scanNotice && <div className={`scan-notice ${scanNotice.kind}`}>{scanNotice.text}</div>}<div className="product-pick-grid">{visibleProducts.map((product) => <button key={product.id} type="button" disabled={product.stock <= 0} onClick={() => change(product, 1)}><span>{product.name}</span><small>{money(product.salePriceIQD)}</small><i>{numberFormatter.format(product.stock)} {product.unit}</i></button>)}</div></section>
+      <section className="product-picker"><form className="cashier-search" onSubmit={scan}><ScanBarcode size={19} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="بارکۆد بسکەنە و Enter بکە..." dir="auto" /><button type="submit">زیادکردن</button></form>{scanNotice && <div className={`scan-notice ${scanNotice.kind}`}><span>{scanNotice.text}</span>{scanNotice.missingBarcode && <button type="button" onClick={() => { sessionStorage.setItem(PENDING_PRODUCT_BARCODE_KEY, scanNotice.missingBarcode!); onNavigate("products"); }}><Plus size={15} />دروستکردنی ئەم کالا</button>}</div>}<div className="product-pick-grid">{visibleProducts.map((product) => <button key={product.id} type="button" disabled={product.stock <= 0} onClick={() => change(product, 1)}><span>{product.name}</span><small>{money(product.salePriceIQD)}</small><i>{numberFormatter.format(product.stock)} {product.unit}</i></button>)}</div></section>
       <section className="cart-panel">
         <header><h4>ناو پسوڵە</h4><span>{numberFormatter.format(cartRows.length)} جۆر</span></header>
         <div className="cart-lines">{!cartRows.length ? <p className="cart-empty">کالا لە لیستەکە هەڵبژێرە</p> : cartRows.map(({ product, quantity, subtotal: lineSubtotal }) => <div className="cart-line" key={product.id}><div><strong>{product.name}</strong><small>{money(product.salePriceIQD)} × {numberFormatter.format(quantity)}</small></div><div className="qty-control"><button type="button" onClick={() => change(product, -1)}><ChevronDown size={15} /></button><span>{numberFormatter.format(quantity)}</span><button type="button" onClick={() => change(product, 1)}><ChevronUp size={15} /></button></div><b>{money(lineSubtotal)}</b></div>)}</div>
