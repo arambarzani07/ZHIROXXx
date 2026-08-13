@@ -7,6 +7,9 @@ import type { ManagerPermission } from "@/lib/production-contract";
 
 type FormState = { name: string; managerName: string; managerEmail: string; permissions: ManagerPermission[] };
 const initial: FormState = { name: "", managerName: "", managerEmail: "", permissions: [...MANAGER_PERMISSIONS] };
+const platformError = (message: string) => message === "MANAGER_ACCOUNT_ALREADY_ASSIGNED"
+  ? "ئەم هەژمارە پێشتر بۆ مارکێتێکی تر دانراوە؛ هەر هەژمارێک تەنها بۆ یەک مارکێتە."
+  : message;
 
 export default function PlatformPage() {
   const [markets, setMarkets] = useState<PlatformMarket[]>([]);
@@ -37,7 +40,7 @@ export default function PlatformPage() {
       const payload = await response.json().catch(() => ({})) as { market?: PlatformMarket; error?: string };
       if (!response.ok || !payload.market) throw new Error(payload.error ?? "MARKET_CREATE_FAILED");
       setMarkets((current) => [payload.market!, ...current]); setForm(initial);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "MARKET_CREATE_FAILED"); }
+    } catch (reason) { setError(platformError(reason instanceof Error ? reason.message : "MARKET_CREATE_FAILED")); }
     finally { setBusy(false); }
   };
 
@@ -48,7 +51,7 @@ export default function PlatformPage() {
       const payload = await response.json().catch(() => ({})) as { market?: PlatformMarket; error?: string };
       if (!response.ok || !payload.market) throw new Error(payload.error ?? "MARKET_UPDATE_FAILED");
       setMarkets((current) => current.map((item) => item.marketId === payload.market!.marketId ? payload.market! : item)); setEditing(null);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "MARKET_UPDATE_FAILED"); }
+    } catch (reason) { setError(platformError(reason instanceof Error ? reason.message : "MARKET_UPDATE_FAILED")); }
     finally { setBusy(false); }
   };
 
