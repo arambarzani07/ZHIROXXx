@@ -14,7 +14,7 @@ test("packages the multi-market tenancy foundation with server-side membership g
   assert.match(store, /mm\.market_id = \? AND mm\.actor_id = \?/);
   assert.match(store, /row\.status === "suspended"/);
   assert.match(route, /getChatGPTUser/);
-  assert.match(route, /createMarket/);
+  assert.match(route, /PLATFORM_OWNER_REQUIRED/);
 });
 
 test("scopes cloud sync and production requests to the selected market", async () => {
@@ -29,4 +29,22 @@ test("scopes cloud sync and production requests to the selected market", async (
   assert.match(syncRoute, /x-zhirox-market-id/);
   assert.match(productionRoute, /x-zhirox-market-id/);
   assert.match(client, /X-Zhirox-Market-Id/);
+});
+
+test("reserves market creation and manager permissions for the platform owner", async () => {
+  const [platformStore, platformRoute, platformPage, syncStore] = await Promise.all([
+    readFile(new URL("../db/platform-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/platform/markets/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/platform/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../db/sync-store.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(platformStore, /requirePlatformOwner/);
+  assert.match(platformStore, /pos_platform_owners/);
+  assert.match(platformStore, /role, active, created_at, updated_at/);
+  assert.match(platformStore, /'manager'/);
+  assert.match(platformRoute, /createPlatformMarket/);
+  assert.match(platformRoute, /updatePlatformMarket/);
+  assert.match(platformPage, /دەسەڵاتەکانی بەڕێوەبەر/);
+  assert.match(syncStore, /pos_manager_permissions/);
+  assert.match(syncStore, /writeStoresForActor/);
 });
