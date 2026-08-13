@@ -49,6 +49,21 @@ function slugify(value: string) {
 export async function listActorMarkets(input: { email: string; displayName: string }): Promise<MarketMembership[]> {
   await ensureMarketSchema();
   const actorId = await actorIdForEmail(input.email);
+  const email = input.email.trim().toLowerCase();
+  const displayName = input.displayName.trim().slice(0, 120) || email;
+  const now = new Date().toISOString();
+  const legacy = await database().prepare(`SELECT role, active FROM pos_staff
+    WHERE tenant_id = 'main-market' AND actor_id = ?`).bind(actorId).first<{ role: MarketMembership["role"]; active: number }>().catch(() => null);
+  if (legacy?.active === 1) {
+    await database().batch([
+      database().prepare(`INSERT OR IGNORE INTO pos_markets
+        (id, name, slug, status, owner_actor_id, created_at, updated_at)
+        VALUES ('main-market', 'Zhirox Smart POS', 'main-market', 'active', ?, ?, ?)`).bind(actorId, now, now),
+      database().prepare(`INSERT OR IGNORE INTO pos_market_memberships
+        (market_id, actor_id, email, display_name, role, active, created_at, updated_at)
+        VALUES ('main-market', ?, ?, ?, ?, 1, ?, ?)`).bind(actorId, email, displayName, legacy.role, now, now),
+    ]);
+  }
   const rows = await database().prepare(`SELECT m.id AS marketId, m.name AS marketName, m.slug AS marketSlug,
       m.status, mm.role, mm.active
     FROM pos_market_memberships mm INNER JOIN pos_markets m ON m.id = mm.market_id
