@@ -28,6 +28,17 @@ export const posMarketMemberships = sqliteTable("pos_market_memberships", {
   index("pos_market_memberships_actor_idx").on(table.actorId, table.active),
 ]);
 
+export const posManagerPermissions = sqliteTable("pos_manager_permissions", {
+  marketId: text("market_id").notNull(),
+  actorId: text("actor_id").notNull(),
+  permission: text("permission").notNull(),
+  grantedByActorId: text("granted_by_actor_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.marketId, table.actorId, table.permission] }),
+  index("pos_manager_permissions_actor_idx").on(table.actorId, table.marketId),
+]);
+
 export const posSyncMutations = sqliteTable("pos_sync_mutations", {
   tenantId: text("tenant_id").notNull(),
   mutationId: text("mutation_id").notNull(),
