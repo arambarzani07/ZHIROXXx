@@ -1,0 +1,14 @@
+{
+  "name": "Zhirox Smart POS",
+  "short_name": "Zhirox POS",
+  "description": "سیستەمی کاشێر، کۆگا و ژمێریاری بە زمانی کوردی",
+  "lang": "ckb",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2f3f7",
+  "theme_color": "#a73b37",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
