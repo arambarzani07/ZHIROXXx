@@ -95,7 +95,7 @@ test("posts immutable balanced journals for every financial and inventory mutati
   assert.match(databaseSource, /export function buildBalancedJournalEntry/);
   assert.match(moneySource, /Math\.abs\(debitTotalIQD - creditTotalIQD\) > 0\.001/);
   assert.match(syncContractSource, /"journalEntries"/);
-  assert.match(serviceWorkerSource, /zhirox-pos-shell-v24/);
+  assert.match(serviceWorkerSource, /zhirox-pos-shell-v25/);
 
   for (const sourceType of [
     "sale", "saleReturn", "purchase", "purchaseReturn", "expense", "cash",
