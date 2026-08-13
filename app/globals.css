@@ -146,6 +146,10 @@ button { -webkit-tap-highlight-color: transparent; }
 .video-account-title span { color: rgba(255,255,255,.66); font-size: 8px; }
 .video-nav { display: none; }
 .topbar > .connection-state { margin-inline-start: auto; }
+.market-switcher { display: flex; align-items: center; gap: 5px; }
+.market-switcher select { max-width: 180px; height: 36px; padding: 0 9px; border: 1px solid rgba(255,255,255,.2); border-radius: 8px; background: rgba(255,255,255,.1); color: #fff; font: inherit; font-size: 11px; }
+.market-switcher select option { color: #19191f; background: #fff; }
+.market-switcher button { width: 36px; height: 36px; border: 1px solid rgba(255,255,255,.2); border-radius: 8px; background: rgba(255,255,255,.1); color: #fff; font-size: 18px; cursor: pointer; }
 .tone-amber { --tone: #d98951; }
 .tone-violet { --tone: #66579c; }
 .tone-red { --tone: #a95050; }
@@ -647,6 +651,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .login-card > small { display: block; margin-top: 20px; color: #8b919b; font-size: 9px; line-height: 1.8; }
 
 @media (max-width: 860px) {
+  .market-switcher select { max-width: 115px; }
   .topbar { min-height: 60px; padding: 0 18px; }
   .brand-lockup { min-width: 0; margin-inline-end: auto; }
   .brand-lockup div, .topbar-nav { display: none; }
