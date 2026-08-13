@@ -87,6 +87,9 @@ export async function createPlatformMarket(input: { ownerActorId: string; name: 
   const managerActorId = await actorIdForEmail(managerEmail);
   const now = new Date().toISOString();
   const db = database();
+  const occupied = await db.prepare("SELECT market_id AS marketId FROM pos_market_memberships WHERE actor_id = ? AND active = 1 LIMIT 1")
+    .bind(managerActorId).first<{ marketId: string }>();
+  if (occupied) throw new Error("MANAGER_ACCOUNT_ALREADY_ASSIGNED");
   await db.batch([
     db.prepare(`INSERT INTO pos_markets (id, name, slug, status, owner_actor_id, created_at, updated_at)
       VALUES (?, ?, ?, 'trial', ?, ?, ?)`).bind(marketId, name, `${slugify(name)}-${marketId.slice(-8)}`, input.ownerActorId, now, now),
@@ -110,6 +113,9 @@ export async function updatePlatformMarket(input: { ownerActorId: string; market
   const actorId = await actorIdForEmail(managerEmail);
   const now = new Date().toISOString();
   const permissions = [...new Set(input.permissions)].filter((item) => MANAGER_PERMISSIONS.includes(item));
+  const occupied = await db.prepare("SELECT market_id AS marketId FROM pos_market_memberships WHERE actor_id = ? AND active = 1 AND market_id <> ? LIMIT 1")
+    .bind(actorId, input.marketId).first<{ marketId: string }>();
+  if (occupied) throw new Error("MANAGER_ACCOUNT_ALREADY_ASSIGNED");
   await db.batch([
     db.prepare("UPDATE pos_markets SET status = ?, updated_at = ? WHERE id = ?").bind(input.status, now, input.marketId),
     db.prepare("UPDATE pos_market_memberships SET active = 0, updated_at = ? WHERE market_id = ? AND role = 'manager'").bind(now, input.marketId),
