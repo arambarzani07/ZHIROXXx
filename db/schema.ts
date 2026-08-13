@@ -1,5 +1,33 @@
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
+export const posMarkets = sqliteTable("pos_markets", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  status: text("status", { enum: ["trial", "active", "suspended"] }).notNull().default("trial"),
+  ownerActorId: text("owner_actor_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("pos_markets_slug_unique").on(table.slug),
+  index("pos_markets_owner_idx").on(table.ownerActorId),
+]);
+
+export const posMarketMemberships = sqliteTable("pos_market_memberships", {
+  marketId: text("market_id").notNull(),
+  actorId: text("actor_id").notNull(),
+  email: text("email").notNull(),
+  displayName: text("display_name").notNull(),
+  role: text("role", { enum: ["owner", "manager", "cashier", "accountant"] }).notNull(),
+  active: integer("active").notNull().default(1),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.marketId, table.actorId] }),
+  uniqueIndex("pos_market_memberships_email_unique").on(table.marketId, table.email),
+  index("pos_market_memberships_actor_idx").on(table.actorId, table.active),
+]);
+
 export const posSyncMutations = sqliteTable("pos_sync_mutations", {
   tenantId: text("tenant_id").notNull(),
   mutationId: text("mutation_id").notNull(),
