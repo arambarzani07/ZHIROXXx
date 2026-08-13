@@ -8,6 +8,7 @@ import {
   type ProductionStatus,
   type ServerStaffProfile,
 } from "@/lib/production-contract";
+import type { ManagerPermission } from "@/lib/production-contract";
 import {
   SYNC_STORE_NAMES,
   type CloudSyncChange,
@@ -180,6 +181,14 @@ export async function ensureSyncSchema() {
       PRIMARY KEY (tenant_id, actor_id),
       UNIQUE (tenant_id, email)
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS pos_manager_permissions (
+      market_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      permission TEXT NOT NULL,
+      granted_by_actor_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (market_id, actor_id, permission)
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS pos_devices (
       tenant_id TEXT NOT NULL,
       device_id TEXT NOT NULL,
@@ -205,6 +214,7 @@ export async function ensureSyncSchema() {
     db.prepare("CREATE INDEX IF NOT EXISTS pos_sync_changes_record_idx ON pos_sync_changes (tenant_id, store_name, record_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS pos_devices_seen_idx ON pos_devices (tenant_id, last_seen_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS pos_restore_points_revision_idx ON pos_restore_points (tenant_id, revision)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS pos_manager_permissions_actor_idx ON pos_manager_permissions (actor_id, market_id)"),
   ]).then(() => undefined).catch((error) => {
     schemaPromise = null;
     throw error;
@@ -257,7 +267,11 @@ export async function authorizeStaff(input: { email: string; displayName: string
     row.displayName = displayName;
     row.updatedAt = now;
   }
-  return { ...toStaff(row), tenantId: input.tenantId, marketName: input.marketName };
+  const permissions = row.role === "manager"
+    ? (await db.prepare("SELECT permission FROM pos_manager_permissions WHERE market_id = ? AND actor_id = ?")
+      .bind(input.tenantId, actorId).all<{ permission: ManagerPermission }>()).results.map((item) => item.permission)
+    : undefined;
+  return { ...toStaff(row), tenantId: input.tenantId, marketName: input.marketName, permissions };
 }
 
 async function readRawStateAt(tenantId: string, revision: number): Promise<CloudSyncRecord[]> {
@@ -293,13 +307,41 @@ async function readRawStateAt(tenantId: string, revision: number): Promise<Cloud
 }
 
 function roleMeta(actor: ServerStaffProfile, revision: number, updatedAt: string | null): CloudSyncMeta {
+  const readStores = readStoresForActor(actor);
   return {
     revision,
     updatedAt,
     role: actor.role,
-    readStores: readStoresForRole(actor.role),
-    writeStores: writeStoresForRole(actor.role),
+    readStores,
+    writeStores: writeStoresForActor(actor),
   };
+}
+
+function permissionStores(actor: ServerStaffProfile) {
+  const permissions = new Set(actor.permissions ?? []);
+  const stores = new Set<SyncStoreName>(["settings", "users", "audit"]);
+  const add = (...items: SyncStoreName[]) => items.forEach((item) => stores.add(item));
+  if (permissions.has("manage_products")) add("products", "losses", "stockAdjustments");
+  if (permissions.has("manage_sales")) add("customers", "products", "sales", "saleReturns", "cashShifts");
+  if (permissions.has("manage_purchases")) add("suppliers", "products", "purchases", "purchaseReturns");
+  if (permissions.has("manage_accounting") || permissions.has("view_reports")) add("customers", "suppliers", "sales", "saleReturns", "purchases", "purchaseReturns", "expenses", "cashEntries", "losses", "cashShifts", "journalEntries", "accounts");
+  return [...stores];
+}
+
+function readStoresForActor(actor: ServerStaffProfile): SyncStoreName[] {
+  return actor.role === "manager" ? permissionStores(actor) : readStoresForRole(actor.role);
+}
+
+function writeStoresForActor(actor: ServerStaffProfile): SyncStoreName[] {
+  if (actor.role !== "manager") return writeStoresForRole(actor.role);
+  const permissions = new Set(actor.permissions ?? []);
+  return permissionStores(actor).filter((store) => {
+    if (store === "users") return permissions.has("manage_staff");
+    if (store === "settings") return permissions.has("manage_settings");
+    if (store === "audit") return true;
+    if (permissions.has("view_reports") && !permissions.has("manage_accounting") && ["expenses", "cashEntries", "journalEntries", "accounts"].includes(store)) return false;
+    return true;
+  });
 }
 
 export async function readCloudSyncState(actor: ServerStaffProfile, requestedRevision?: number): Promise<CloudSyncState> {
@@ -307,7 +349,7 @@ export async function readCloudSyncState(actor: ServerStaffProfile, requestedRev
   const latest = await currentRevision(actor.tenantId);
   const revision = requestedRevision === undefined ? latest : requestedRevision;
   if (!Number.isInteger(revision) || revision < 0 || revision > latest) throw new SyncConflictError(latest);
-  const includedStores = readStoresForRole(actor.role);
+  const includedStores = readStoresForActor(actor);
   const allowed = new Set(includedStores);
   const records = (await readRawStateAt(actor.tenantId, revision)).filter((record) => allowed.has(record.storeName));
   return { ...roleMeta(actor, revision, await latestCompletedAt(actor.tenantId, revision)), records, includedStores };
@@ -349,7 +391,7 @@ export async function readCloudSyncDelta(actor: ServerStaffProfile, since: numbe
   await ensureSyncSchema();
   const revision = await currentRevision(actor.tenantId);
   if (!Number.isInteger(since) || since < 0 || since > revision) throw new SyncConflictError(revision);
-  const includedStores = readStoresForRole(actor.role);
+  const includedStores = readStoresForActor(actor);
   const [base, current, mergedRow, updatedAt] = await Promise.all([
     readRawStateAt(actor.tenantId, since),
     readRawStateAt(actor.tenantId, revision),
@@ -461,7 +503,7 @@ export async function stageSyncChanges(actor: ServerStaffProfile, mutationId: st
   if (!current) throw new Error("SYNC_MUTATION_NOT_FOUND");
   if (current.actorId !== actor.actorId) throw new Error("SYNC_MUTATION_ACCESS_DENIED");
   if (current.status === "completed") return { accepted: changes.length, completed: true };
-  const writable = new Set(writeStoresForRole(actor.role));
+  const writable = new Set(writeStoresForActor(actor));
   const verified = await Promise.all(changes.map(async (change) => {
     if (!writable.has(change.storeName)) throw new Error("SYNC_STORE_WRITE_DENIED");
     const payload = change.operation === "delete" ? tombstone(change.recordId) : change.payload;
@@ -617,7 +659,7 @@ export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId
         base,
         local,
         remote,
-        writableStores: writeStoresForRole(actor.role),
+        writableStores: writeStoresForActor(actor),
       });
       if (merged.conflicts.length) {
         await incrementDeviceConflict(actor.tenantId, existing.deviceId);
