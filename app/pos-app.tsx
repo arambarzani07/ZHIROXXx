@@ -227,16 +227,6 @@ export default function PosApp() {
     } finally { setSyncBusy(false); }
   }, [marketId, refreshCounts]);
 
-  const createAnotherMarket = useCallback(async () => {
-    const name = window.prompt("ناوی مارکێتی نوێ بنووسە:")?.trim();
-    if (!name) return;
-    const response = await fetch("/api/markets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-    const payload = await response.json().catch(() => ({})) as { market?: MarketMembership; error?: string };
-    if (!response.ok || !payload.market) { window.alert(payload.error ?? "مارکێت درووست نەکرا"); return; }
-    setMarkets((current) => [...current, payload.market!]);
-    await changeMarket(payload.market.marketId);
-  }, [changeMarket]);
-
   useEffect(() => {
     if (!dbReady || !marketId) return;
     const synchronize = () => { if (navigator.onLine) void performSync(); };
@@ -327,7 +317,7 @@ export default function PosApp() {
             {!markets.length && <option value="">مارکێت هەڵبژێرە</option>}
             {markets.map((market) => <option key={market.marketId} value={market.marketId}>{market.marketName}</option>)}
           </select>
-          <button type="button" onClick={() => void createAnotherMarket()} title="مارکێتی نوێ">＋</button>
+          <a href="/platform" title="پانێڵی خاوەنی سیستەم">⚙</a>
         </div>
 
         <nav className="topbar-nav video-nav" aria-label="ڕێنوێنی سەرەکی">
