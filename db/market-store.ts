@@ -70,7 +70,7 @@ export async function listActorMarkets(input: { email: string; displayName: stri
   const rows = await database().prepare(`SELECT m.id AS marketId, m.name AS marketName, m.slug AS marketSlug,
       m.status, mm.role, mm.active
     FROM pos_market_memberships mm INNER JOIN pos_markets m ON m.id = mm.market_id
-    WHERE mm.actor_id = ? AND mm.active = 1 ORDER BY m.created_at`)
+    WHERE mm.actor_id = ? AND mm.active = 1 ORDER BY m.created_at LIMIT 1`)
     .bind(actorId).all<MarketMembership & { active: number }>();
   return rows.results.map((row) => ({ ...row, active: row.active === 1 }));
 }
