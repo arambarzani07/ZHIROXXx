@@ -1,4 +1,4 @@
-const CACHE_NAME = "zhirox-pos-shell-v22";
+const CACHE_NAME = "zhirox-pos-shell-v23";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (event) => {
