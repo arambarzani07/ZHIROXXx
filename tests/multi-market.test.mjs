@@ -51,4 +51,15 @@ test("reserves market creation and manager permissions for the platform owner", 
   assert.match(platformPage, /دەسەڵاتەکانی بەڕێوەبەر/);
   assert.match(syncStore, /pos_manager_permissions/);
   assert.match(syncStore, /writeStoresForActor/);
+  assert.match(platformStore, /MANAGER_ACCOUNT_ALREADY_ASSIGNED/);
+  assert.match(platformPage, /بەڕێوەبردنی مارکێتەکان/);
+});
+
+test("auto-binds the market account without rendering a market selector", async () => {
+  const app = await readFile(new URL("../app/pos-app.tsx", import.meta.url), "utf8");
+  assert.match(app, /const assigned = available\[0\]/);
+  assert.match(app, /switchCloudMarket\(assigned\.marketId\)/);
+  assert.match(app, /NO_ASSIGNED_MARKET/);
+  assert.doesNotMatch(app, /هەڵبژاردنی مارکێت/);
+  assert.doesNotMatch(app, /<select aria-label="هەڵبژاردنی مارکێت"/);
 });
