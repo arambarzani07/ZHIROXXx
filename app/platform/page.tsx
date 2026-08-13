@@ -56,7 +56,7 @@ export default function PlatformPage() {
   if (error === "AUTH_REQUIRED" || error === "PLATFORM_OWNER_REQUIRED") return <main className="platform-shell"><section className="platform-denied"><ShieldCheck size={44} /><h1>دەستگەیشتن ڕێگەپێنەدراوە</h1><p>ئەم بەشە تەنها بۆ خاوەنی سیستەمە و هیچ داتای دارایی مارکێتەکان پیشان نادات.</p><a href="/"><ArrowRight size={17} /> گەڕانەوە</a></section></main>;
 
   return <main className="platform-shell">
-    <header className="platform-head"><div><span><ShieldCheck size={18} /> PLATFORM OWNER</span><h1>بەڕێوەبردنی مارکێتەکان</h1><p>درووستکردنی مارکێت، دانانی بەڕێوەبەر و دیاریکردنی دەسەڵات — بەبێ دەستگەیشتن بە داتای بازرگانی.</p></div><a href="/"><ArrowRight size={17} /> سیستەمی POS</a></header>
+    <header className="platform-head"><div><span><ShieldCheck size={18} /> PLATFORM OWNER — SINGLE ACCOUNT</span><h1>بەڕێوەبردنی مارکێتەکان</h1><p>یەک خاوەنی هەمیشەیی؛ تەنها بۆ درووستکردنی مارکێت، دانانی بەڕێوەبەر و دیاریکردنی دەسەڵات — بەبێ دەستگەیشتن بە داتای بازرگانی.</p></div><a href="/"><ArrowRight size={17} /> سیستەمی POS</a></header>
     <section className="platform-metrics"><div><Building2 /><span>هەموو مارکێتەکان</span><strong>{markets.length}</strong></div><div><Check /><span>مارکێتی چالاک</span><strong>{activeCount}</strong></div><div><UserCog /><span>بەڕێوەبەری دانراو</span><strong>{markets.filter((item) => item.managerEmail).length}</strong></div></section>
     {error && <p className="platform-error">{error}</p>}
     <section className="platform-grid">
