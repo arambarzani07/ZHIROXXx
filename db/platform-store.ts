@@ -16,6 +16,15 @@ export async function ensurePlatformSchema() {
       actor_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
       active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS pos_platform_owner_block_second
+      BEFORE INSERT ON pos_platform_owners WHEN EXISTS (SELECT 1 FROM pos_platform_owners)
+      BEGIN SELECT RAISE(ABORT, 'PLATFORM_OWNER_SINGLETON_LOCKED'); END`),
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS pos_platform_owner_block_identity_change
+      BEFORE UPDATE OF actor_id, email ON pos_platform_owners
+      BEGIN SELECT RAISE(ABORT, 'PLATFORM_OWNER_IDENTITY_LOCKED'); END`),
+    db.prepare(`CREATE TRIGGER IF NOT EXISTS pos_platform_owner_block_delete
+      BEFORE DELETE ON pos_platform_owners
+      BEGIN SELECT RAISE(ABORT, 'PLATFORM_OWNER_PERMANENT'); END`),
     db.prepare(`CREATE TABLE IF NOT EXISTS pos_manager_permissions (
       market_id TEXT NOT NULL, actor_id TEXT NOT NULL, permission TEXT NOT NULL,
       granted_by_actor_id TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -25,9 +34,18 @@ export async function ensurePlatformSchema() {
   ]);
   const ownerActorId = await actorIdForEmail(INITIAL_PLATFORM_OWNER_EMAIL);
   const now = new Date().toISOString();
-  await db.prepare(`INSERT OR IGNORE INTO pos_platform_owners
-    (actor_id, email, display_name, active, created_at, updated_at) VALUES (?, ?, 'System Owner', 1, ?, ?)`)
-    .bind(ownerActorId, INITIAL_PLATFORM_OWNER_EMAIL, now, now).run();
+  const existingOwner = await db.prepare("SELECT actor_id AS actorId FROM pos_platform_owners LIMIT 1").first<{ actorId: string }>();
+  if (!existingOwner) {
+    await db.prepare(`INSERT INTO pos_platform_owners
+      (actor_id, email, display_name, active, created_at, updated_at) VALUES (?, ?, 'System Owner', 1, ?, ?)`)
+      .bind(ownerActorId, INITIAL_PLATFORM_OWNER_EMAIL, now, now).run();
+  } else if (existingOwner.actorId !== ownerActorId) {
+    throw new Error("PLATFORM_OWNER_IDENTITY_MISMATCH");
+  }
+  await db.batch([
+    db.prepare("DELETE FROM pos_market_memberships WHERE actor_id = ?").bind(ownerActorId),
+    db.prepare("DELETE FROM pos_staff WHERE actor_id = ?").bind(ownerActorId),
+  ]);
 }
 
 export async function requirePlatformOwner(input: { email: string; displayName: string }) {
