@@ -84,6 +84,7 @@ import {
   type Supplier,
 } from "@/lib/pos-db";
 import { cashDrawerIsSupported, connectCashDrawer, pulseCashDrawer } from "@/lib/pos-hardware";
+import { inspectBarcode, normalizeBarcodeInput, parseScaleBarcode } from "@/lib/pos-barcode";
 import { loadProductionStatus, restoreProductionRevision } from "@/lib/pos-production";
 import { pullCloudOverLocal } from "@/lib/pos-sync";
 import type { ProductionStatus } from "@/lib/production-contract";
@@ -241,7 +242,7 @@ function parseProductsCsv(source: string): Product[] {
   const now = new Date().toISOString();
   const seen = new Set<string>();
   return rows.slice(1).map((values, index) => {
-    const barcode = normalizeDigits(values[barcodeColumn] ?? "").trim();
+    const barcode = normalizeBarcodeInput(values[barcodeColumn] ?? "");
     const name = (values[nameColumn] ?? "").trim();
     if (!barcode || !name) throw new Error(`لە ڕیزی ${index + 2} بارکۆد یان ناو بەتاڵە`);
     if (seen.has(barcode)) throw new Error(`بارکۆدی ${barcode} لە فایلەکەدا دووبارەیە`);
@@ -499,12 +500,14 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
   async function submit(event: FormEvent<HTMLFormElement>, existing: Product | null) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const barcode = String(form.get("barcode") ?? "").trim();
+    const barcode = normalizeBarcodeInput(String(form.get("barcode") ?? ""));
     const name = String(form.get("name") ?? "").trim();
     const now = new Date().toISOString();
     const product: Product = { id: existing?.id ?? createId("product"), barcode, name, unit: String(form.get("unit") ?? "دانە"), purchasePriceIQD: Number(form.get("purchasePrice") ?? 0), salePriceIQD: Number(form.get("salePrice") ?? 0), stock: Number(form.get("stock") ?? 0), lowStock: Number(form.get("lowStock") ?? 0), createdAt: existing?.createdAt ?? now, updatedAt: now };
     const saved = await mutate(async () => {
       if (!name || !barcode) throw new Error("ناو و بارکۆد پێویستن");
+      const inspection = inspectBarcode(barcode);
+      if (!inspection.valid && inspection.kind === "invalid") throw new Error(inspection.message);
       if (data.products.some((item) => item.barcode === barcode && item.id !== existing?.id)) throw new Error("ئەم بارکۆدە پێشتر تۆمارکراوە");
       return saveRecordWithAudit("products", product, existing ? "product.updated" : "product.created", product.name);
     }, existing ? "زانیاری کالا نوێ کرایەوە" : "کالا بە سەرکەوتوویی تۆمارکرا");
@@ -546,7 +549,9 @@ function ProductsPage({ data, search, setSearch, formOpen, setFormOpen, mutate }
 }
 
 function ProductForm({ product, onSubmit, onCancel }: { product: Product | null; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onCancel: () => void }) {
-  return <form className="record-form" onSubmit={onSubmit}><Field label="بارکۆد"><input name="barcode" required autoFocus inputMode="numeric" dir="ltr" defaultValue={product?.barcode} /></Field><Field label="ناوی کالا"><input name="name" required defaultValue={product?.name} /></Field><Field label="یەکە"><select name="unit" defaultValue={product?.unit ?? "دانە"}><option>دانە</option><option>کارتۆن</option><option>کیلۆ</option><option>مەتر</option><option>پاکەت</option></select></Field><Field label={product ? "بڕی ئێستای کۆگا" : "بڕی سەرەتایی"}>{product ? <><input value={product.stock} disabled /><input name="stock" type="hidden" value={product.stock} /></> : <input name="stock" type="number" min="0" step="0.001" defaultValue="0" />}</Field><Field label="نرخی کڕین"><input name="purchasePrice" type="number" min="0" defaultValue={product?.purchasePriceIQD ?? 0} /></Field><Field label="نرخی فرۆشتن"><input name="salePrice" type="number" min="0" defaultValue={product?.salePriceIQD ?? 0} /></Field><Field label="ئاگاداری کەمبوو"><input name="lowStock" type="number" min="0" step="0.001" defaultValue={product?.lowStock ?? 5} /></Field>{product && <p className="settings-hint field-wide"><AlertTriangle size={17} />بۆ زیاد یان کەمکردنی بڕ، بەشی کۆگا بەکاربهێنە تا مێژووی جووڵەکە بپارێزرێت.</p>}<div className="form-actions"><button className="secondary-action" type="button" onClick={onCancel}>پاشگەزبوونەوە</button><SubmitButton>{product ? "نوێکردنەوە" : "تۆمارکردن"}</SubmitButton></div></form>;
+  const [barcode, setBarcode] = useState(product?.barcode ?? "");
+  const inspection = barcode ? inspectBarcode(barcode) : null;
+  return <form className="record-form" onSubmit={onSubmit}><Field label="بارکۆد"><input name="barcode" required autoFocus inputMode="numeric" dir="ltr" value={barcode} onChange={(event) => setBarcode(event.target.value)} /></Field>{inspection && <p className={`barcode-inspection field-wide ${inspection.valid ? "valid" : "warning"}`}><ScanBarcode size={17} /><span><b dir="ltr">{inspection.normalized || "—"}</b>{inspection.message}</span></p>}<Field label="ناوی کالا"><input name="name" required defaultValue={product?.name} /></Field><Field label="یەکە"><select name="unit" defaultValue={product?.unit ?? "دانە"}><option>دانە</option><option>کارتۆن</option><option>کیلۆ</option><option>مەتر</option><option>پاکەت</option></select></Field><Field label={product ? "بڕی ئێستای کۆگا" : "بڕی سەرەتایی"}>{product ? <><input value={product.stock} disabled /><input name="stock" type="hidden" value={product.stock} /></> : <input name="stock" type="number" min="0" step="0.001" defaultValue="0" />}</Field><Field label="نرخی کڕین"><input name="purchasePrice" type="number" min="0" defaultValue={product?.purchasePriceIQD ?? 0} /></Field><Field label="نرخی فرۆشتن"><input name="salePrice" type="number" min="0" defaultValue={product?.salePriceIQD ?? 0} /></Field><Field label="ئاگاداری کەمبوو"><input name="lowStock" type="number" min="0" step="0.001" defaultValue={product?.lowStock ?? 5} /></Field>{product && <p className="settings-hint field-wide"><AlertTriangle size={17} />بۆ زیاد یان کەمکردنی بڕ، بەشی کۆگا بەکاربهێنە تا مێژووی جووڵەکە بپارێزرێت.</p>}<div className="form-actions"><button className="secondary-action" type="button" onClick={onCancel}>پاشگەزبوونەوە</button><SubmitButton>{product ? "نوێکردنەوە" : "تۆمارکردن"}</SubmitButton></div></form>;
 }
 
 function WarehousePage({ data, search, setSearch, onNavigate, mutate }: { data: DashboardData; search: string; setSearch: (v: string) => void; onNavigate: Props["onNavigate"]; mutate: Mutate }) {
@@ -731,7 +736,7 @@ function Cashier({ data, mutate, onNavigate }: { data: DashboardData; mutate: Mu
 
   function scan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const raw = query.trim();
+    const raw = normalizeBarcodeInput(query);
     if (!raw) return;
     let quantity = 1;
     let product = data.products.find((item) => item.barcode === raw);
@@ -740,12 +745,10 @@ function Cashier({ data, mutate, onNavigate }: { data: DashboardData; mutate: Mu
     const itemDigits = settings?.scaleItemDigits || 7;
     const decimals = settings?.scaleDecimals ?? 3;
 
-    if (!product && raw.startsWith(prefix) && raw.length > itemDigits + 1) {
-      const itemCode = raw.slice(0, itemDigits);
-      const shortCode = itemCode.slice(prefix.length);
-      product = data.products.find((item) => item.barcode === itemCode || item.barcode === shortCode);
-      const measured = raw.slice(itemDigits, -1);
-      if (/^\d+$/.test(measured)) quantity = Number(measured) / (10 ** decimals);
+    const scale = parseScaleBarcode(raw, { prefix, itemDigits, decimals });
+    if (!product && scale) {
+      product = data.products.find((item) => item.barcode === scale.itemCode || item.barcode === scale.shortCode);
+      quantity = scale.quantity;
     }
 
     if (!product) {
