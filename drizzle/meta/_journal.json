@@ -15,6 +15,13 @@
       "when": 1786547463294,
       "tag": "0001_lively_the_fallen",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786599404684,
+      "tag": "0002_rainy_gladiator",
+      "breakpoints": true
     }
   ]
 }
