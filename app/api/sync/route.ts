@@ -11,6 +11,7 @@ import {
   SyncMergeConflictError,
 } from "@/db/sync-store";
 import { SYNC_STORE_NAMES, type CloudSyncChange } from "@/lib/sync-contract";
+import { resolveMarketContext } from "@/db/market-store";
 
 export const dynamic = "force-dynamic";
 
@@ -21,10 +22,14 @@ function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: noStoreHeaders });
 }
 
-async function authenticatedActor() {
+async function authenticatedActor(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return { status: 401 as const, actor: null };
-  const actor = await authorizeStaff({ email: user.email, displayName: user.displayName });
+  const marketId = request.headers.get("x-zhirox-market-id")?.trim();
+  if (!marketId) return { status: 400 as const, actor: null };
+  const market = await resolveMarketContext({ email: user.email, displayName: user.displayName, marketId });
+  if (!market) return { status: 403 as const, actor: null };
+  const actor = await authorizeStaff({ ...market, tenantId: market.marketId });
   return actor ? { status: 200 as const, actor } : { status: 403 as const, actor: null };
 }
 
@@ -39,11 +44,11 @@ function conflictResponse(error: SyncConflictError) {
 export async function GET(request: Request) {
   let auth;
   try {
-    auth = await authenticatedActor();
+    auth = await authenticatedActor(request);
   } catch {
     return json({ error: "AUTHORIZATION_UNAVAILABLE" }, 503);
   }
-  if (!auth.actor) return json({ error: auth.status === 401 ? "AUTH_REQUIRED" : "STAFF_ACCESS_DENIED" }, auth.status);
+  if (!auth.actor) return json({ error: auth.status === 401 ? "AUTH_REQUIRED" : auth.status === 400 ? "MARKET_REQUIRED" : "STAFF_ACCESS_DENIED" }, auth.status);
   try {
     const params = new URL(request.url).searchParams;
     if (params.get("mode") === "meta") return json(await readCloudSyncMeta(auth.actor));
@@ -66,11 +71,11 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   let auth;
   try {
-    auth = await authenticatedActor();
+    auth = await authenticatedActor(request);
   } catch {
     return json({ error: "AUTHORIZATION_UNAVAILABLE" }, 503);
   }
-  if (!auth.actor) return json({ error: auth.status === 401 ? "AUTH_REQUIRED" : "STAFF_ACCESS_DENIED" }, auth.status);
+  if (!auth.actor) return json({ error: auth.status === 401 ? "AUTH_REQUIRED" : auth.status === 400 ? "MARKET_REQUIRED" : "STAFF_ACCESS_DENIED" }, auth.status);
   const length = Number(request.headers.get("content-length") ?? 0);
   if (length > 1_500_000) return json({ error: "SYNC_PAYLOAD_TOO_LARGE" }, 413);
 
