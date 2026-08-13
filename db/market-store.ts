@@ -49,6 +49,9 @@ function slugify(value: string) {
 export async function listActorMarkets(input: { email: string; displayName: string }): Promise<MarketMembership[]> {
   await ensureMarketSchema();
   const actorId = await actorIdForEmail(input.email);
+  const platformOwner = await database().prepare("SELECT 1 AS found FROM pos_platform_owners WHERE actor_id = ? AND active = 1")
+    .bind(actorId).first<{ found: number }>().catch(() => null);
+  if (platformOwner) return [];
   const email = input.email.trim().toLowerCase();
   const displayName = input.displayName.trim().slice(0, 120) || email;
   const now = new Date().toISOString();
