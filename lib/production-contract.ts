@@ -1,8 +1,11 @@
 import type { SyncStoreName } from "@/lib/sync-contract";
 
-export const POS_APP_VERSION = 23;
+export const POS_APP_VERSION = 24;
 
 export type PosRole = "owner" | "manager" | "cashier" | "accountant";
+export type ManagerPermission =
+  | "manage_staff" | "manage_products" | "manage_sales" | "manage_purchases"
+  | "manage_accounting" | "view_reports" | "manage_settings" | "restore_backups";
 
 const allStores: SyncStoreName[] = [
   "customers", "suppliers", "products", "sales", "saleReturns", "purchases",
@@ -49,6 +52,7 @@ export function canRoleWriteStore(role: PosRole, storeName: SyncStoreName): bool
 export type ServerStaffProfile = {
   tenantId: string;
   marketName: string;
+  permissions?: ManagerPermission[];
   actorId: string;
   email: string;
   displayName: string;
