@@ -52,7 +52,6 @@ import {
 } from "@/lib/pos-db";
 import { pullCloudOverLocal, switchCloudMarket, syncPosData, type PosSyncResult } from "@/lib/pos-sync";
 import { getSelectedMarketId, loadMarkets, setSelectedMarketId } from "@/lib/market-client";
-import type { MarketMembership } from "@/lib/market-contract";
 import ModuleWorkspace, { type WorkspaceModuleKey } from "./module-workspace";
 
 type Tone = "amber" | "violet" | "red" | "charcoal" | "slate";
@@ -163,8 +162,9 @@ export default function PosApp() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [syncState, setSyncState] = useState<PosSyncResult>(initialSyncState);
   const [syncBusy, setSyncBusy] = useState(false);
-  const [markets, setMarkets] = useState<MarketMembership[]>([]);
   const [marketId, setMarketId] = useState("");
+  const [marketReady, setMarketReady] = useState(false);
+  const [marketAccessError, setMarketAccessError] = useState("");
 
   const refreshCounts = useCallback(async () => {
     const [nextCounts, nextSettings] = await Promise.all([
@@ -204,28 +204,28 @@ export default function PosApp() {
   }, [refreshCounts]);
 
   useEffect(() => {
-    loadMarkets().then((available) => {
-      setMarkets(available);
-      if (!available.length) return;
-      const stored = getSelectedMarketId();
-      const selected = available.some((market) => market.marketId === stored) ? stored : available[0].marketId;
-      setSelectedMarketId(selected);
-      setMarketId(selected);
-    }).catch(() => undefined);
+    let active = true;
+    (async () => {
+      try {
+        const available = await loadMarkets();
+        if (!active) return;
+        if (!available.length) { setMarketAccessError("NO_ASSIGNED_MARKET"); return; }
+        const assigned = available[0];
+        const stored = getSelectedMarketId();
+        if (stored !== assigned.marketId) {
+          if (!navigator.onLine) { setMarketAccessError("MARKET_FIRST_SYNC_ONLINE_REQUIRED"); return; }
+          await switchCloudMarket(assigned.marketId);
+          clearPosSession();
+        } else setSelectedMarketId(assigned.marketId);
+        if (!active) return;
+        setMarketId(assigned.marketId);
+        setMarketReady(true);
+      } catch (reason) {
+        if (active) setMarketAccessError(reason instanceof Error ? reason.message : "MARKET_ACCESS_FAILED");
+      }
+    })();
+    return () => { active = false; };
   }, []);
-
-  const changeMarket = useCallback(async (nextMarketId: string) => {
-    if (!nextMarketId || nextMarketId === marketId) return;
-    setSyncBusy(true);
-    setActiveModule(null);
-    try {
-      await switchCloudMarket(nextMarketId);
-      setMarketId(nextMarketId);
-      clearPosSession();
-      await refreshCounts();
-      setSyncState({ phase: "synced", pending: 0, revision: 0, lastSyncedAt: new Date().toISOString(), pulled: true });
-    } finally { setSyncBusy(false); }
-  }, [marketId, refreshCounts]);
 
   useEffect(() => {
     if (!dbReady || !marketId) return;
@@ -295,6 +295,9 @@ export default function PosApp() {
     if (selected) setActiveModule(selected);
   }, [visibleModules]);
 
+  if (marketAccessError) return <main className="market-access-gate"><Store size={42} /><h1>مارکێت بەردەست نییە</h1><p>{marketAccessError === "NO_ASSIGNED_MARKET" ? "ئەم هەژمارە بۆ هیچ مارکێتێک دانەنراوە. پەیوەندی بە خاوەنی سیستەم بکە." : marketAccessError === "MARKET_FIRST_SYNC_ONLINE_REQUIRED" ? "بۆ یەکەم هاوکاتکردن پێویستە ئینتەرنێت بەردەست بێت." : "بە هەژماری بەڕێوەبەری مارکێتەکەت بچۆ ژوورەوە."}</p></main>;
+  if (!marketReady) return <main className="market-access-gate"><Store size={42} /><h1>مارکێتەکەت ئامادە دەکرێت</h1><p>هەژمارەکەت تەنها بە مارکێتی خۆت دەبەسترێتەوە.</p></main>;
+
   if (dbReady && lockEnabled && !session) {
     return <LoginGate marketName={settings?.marketName || "Zhirox Smart POS"} />;
   }
@@ -311,14 +314,6 @@ export default function PosApp() {
         </div>
 
         <div className="video-account-title"><strong>داشبۆردی حساب</strong><span>{settings?.marketName || "Zhirox Smart POS"}</span></div>
-
-        <div className="market-switcher">
-          <select aria-label="هەڵبژاردنی مارکێت" value={marketId} onChange={(event) => void changeMarket(event.target.value)} disabled={syncBusy}>
-            {!markets.length && <option value="">مارکێت هەڵبژێرە</option>}
-            {markets.map((market) => <option key={market.marketId} value={market.marketId}>{market.marketName}</option>)}
-          </select>
-          <a href="/platform" title="پانێڵی خاوەنی سیستەم">⚙</a>
-        </div>
 
         <nav className="topbar-nav video-nav" aria-label="ڕێنوێنی سەرەکی">
           <button className="nav-item active" type="button">داشبۆرد</button>
