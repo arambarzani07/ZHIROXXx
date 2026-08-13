@@ -13,6 +13,7 @@ import {
   type SyncMeta,
 } from "@/lib/pos-db";
 import { POS_APP_VERSION } from "@/lib/production-contract";
+import { getSelectedMarketId, setSelectedMarketId } from "@/lib/market-client";
 import {
   SYNC_STORE_NAMES,
   type CloudSyncChange,
@@ -75,10 +76,11 @@ async function sha256(value: unknown): Promise<string> {
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const marketId = getSelectedMarketId();
   const response = await fetch(url, {
     cache: "no-store",
     ...init,
-    headers: init?.body ? { "Content-Type": "application/json", ...init.headers } : init?.headers,
+    headers: { ...(init?.body ? { "Content-Type": "application/json" } : {}), ...(marketId ? { "X-Zhirox-Market-Id": marketId } : {}), ...init?.headers },
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
@@ -89,6 +91,13 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     );
   }
   return payload as T;
+}
+
+export async function switchCloudMarket(marketId: string): Promise<CloudSyncState> {
+  setSelectedMarketId(marketId);
+  const state = await remoteState();
+  await replaceLocalStateFromCloud(state);
+  return state;
 }
 
 async function remoteMeta(): Promise<CloudSyncMeta> {
