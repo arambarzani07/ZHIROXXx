@@ -25,6 +25,11 @@ body {
 button, input, select, textarea { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 
+.barcode-inspection { margin: -3px 0 2px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; border: 1px solid #d9e5de; border-radius: 10px; color: #24704d; background: #f4fbf7; }
+.barcode-inspection.warning { color: #8c5b0a; border-color: #edd9ae; background: #fff9ec; }
+.barcode-inspection span { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.barcode-inspection b { font-size: 12px; }
+
 .pos-shell { min-height: 100vh; }
 
 .topbar {
