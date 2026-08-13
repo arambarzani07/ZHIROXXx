@@ -16,3 +16,17 @@ test("packages the multi-market tenancy foundation with server-side membership g
   assert.match(route, /getChatGPTUser/);
   assert.match(route, /createMarket/);
 });
+
+test("scopes cloud sync and production requests to the selected market", async () => {
+  const [syncStore, syncRoute, productionRoute, client] = await Promise.all([
+    readFile(new URL("../db/sync-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/sync/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/production/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/pos-sync.ts", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(syncStore, /const TENANT_ID = "main-market"/);
+  assert.match(syncStore, /actor\.tenantId/);
+  assert.match(syncRoute, /x-zhirox-market-id/);
+  assert.match(productionRoute, /x-zhirox-market-id/);
+  assert.match(client, /X-Zhirox-Market-Id/);
+});
