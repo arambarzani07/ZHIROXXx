@@ -50,7 +50,9 @@ import {
   type PosUser,
   type StoreCounts,
 } from "@/lib/pos-db";
-import { pullCloudOverLocal, syncPosData, type PosSyncResult } from "@/lib/pos-sync";
+import { pullCloudOverLocal, switchCloudMarket, syncPosData, type PosSyncResult } from "@/lib/pos-sync";
+import { getSelectedMarketId, loadMarkets, setSelectedMarketId } from "@/lib/market-client";
+import type { MarketMembership } from "@/lib/market-contract";
 import ModuleWorkspace, { type WorkspaceModuleKey } from "./module-workspace";
 
 type Tone = "amber" | "violet" | "red" | "charcoal" | "slate";
@@ -161,6 +163,8 @@ export default function PosApp() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [syncState, setSyncState] = useState<PosSyncResult>(initialSyncState);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [markets, setMarkets] = useState<MarketMembership[]>([]);
+  const [marketId, setMarketId] = useState("");
 
   const refreshCounts = useCallback(async () => {
     const [nextCounts, nextSettings] = await Promise.all([
@@ -200,7 +204,41 @@ export default function PosApp() {
   }, [refreshCounts]);
 
   useEffect(() => {
-    if (!dbReady) return;
+    loadMarkets().then((available) => {
+      setMarkets(available);
+      if (!available.length) return;
+      const stored = getSelectedMarketId();
+      const selected = available.some((market) => market.marketId === stored) ? stored : available[0].marketId;
+      setSelectedMarketId(selected);
+      setMarketId(selected);
+    }).catch(() => undefined);
+  }, []);
+
+  const changeMarket = useCallback(async (nextMarketId: string) => {
+    if (!nextMarketId || nextMarketId === marketId) return;
+    setSyncBusy(true);
+    setActiveModule(null);
+    try {
+      await switchCloudMarket(nextMarketId);
+      setMarketId(nextMarketId);
+      clearPosSession();
+      await refreshCounts();
+      setSyncState({ phase: "synced", pending: 0, revision: 0, lastSyncedAt: new Date().toISOString(), pulled: true });
+    } finally { setSyncBusy(false); }
+  }, [marketId, refreshCounts]);
+
+  const createAnotherMarket = useCallback(async () => {
+    const name = window.prompt("ناوی مارکێتی نوێ بنووسە:")?.trim();
+    if (!name) return;
+    const response = await fetch("/api/markets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    const payload = await response.json().catch(() => ({})) as { market?: MarketMembership; error?: string };
+    if (!response.ok || !payload.market) { window.alert(payload.error ?? "مارکێت درووست نەکرا"); return; }
+    setMarkets((current) => [...current, payload.market!]);
+    await changeMarket(payload.market.marketId);
+  }, [changeMarket]);
+
+  useEffect(() => {
+    if (!dbReady || !marketId) return;
     const synchronize = () => { if (navigator.onLine) void performSync(); };
     synchronize();
     window.addEventListener("online", synchronize);
@@ -209,7 +247,7 @@ export default function PosApp() {
       window.removeEventListener("online", synchronize);
       window.clearInterval(interval);
     };
-  }, [dbReady, performSync]);
+  }, [dbReady, marketId, performSync]);
 
   useEffect(() => {
     if (
@@ -283,6 +321,14 @@ export default function PosApp() {
         </div>
 
         <div className="video-account-title"><strong>داشبۆردی حساب</strong><span>{settings?.marketName || "Zhirox Smart POS"}</span></div>
+
+        <div className="market-switcher">
+          <select aria-label="هەڵبژاردنی مارکێت" value={marketId} onChange={(event) => void changeMarket(event.target.value)} disabled={syncBusy}>
+            {!markets.length && <option value="">مارکێت هەڵبژێرە</option>}
+            {markets.map((market) => <option key={market.marketId} value={market.marketId}>{market.marketName}</option>)}
+          </select>
+          <button type="button" onClick={() => void createAnotherMarket()} title="مارکێتی نوێ">＋</button>
+        </div>
 
         <nav className="topbar-nav video-nav" aria-label="ڕێنوێنی سەرەکی">
           <button className="nav-item active" type="button">داشبۆرد</button>
