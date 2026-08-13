@@ -1,6 +1,6 @@
 import type { SyncStoreName } from "@/lib/sync-contract";
 
-export const POS_APP_VERSION = 19;
+export const POS_APP_VERSION = 23;
 
 export type PosRole = "owner" | "manager" | "cashier" | "accountant";
 
@@ -47,6 +47,8 @@ export function canRoleWriteStore(role: PosRole, storeName: SyncStoreName): bool
 }
 
 export type ServerStaffProfile = {
+  tenantId: string;
+  marketName: string;
   actorId: string;
   email: string;
   displayName: string;
