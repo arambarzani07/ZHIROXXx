@@ -18,7 +18,6 @@ import {
   type SyncStoreName,
 } from "@/lib/sync-contract";
 
-const TENANT_ID = "main-market";
 const TOMBSTONE = "__deleted";
 let schemaPromise: Promise<void> | null = null;
 
@@ -213,27 +212,27 @@ export async function ensureSyncSchema() {
   return schemaPromise;
 }
 
-async function currentRevision() {
+async function currentRevision(tenantId: string) {
   const row = await database().prepare(
     "SELECT COALESCE(MAX(revision), 0) AS revision FROM pos_sync_mutations WHERE tenant_id = ? AND status = 'completed'",
-  ).bind(TENANT_ID).first<{ revision: number }>();
+  ).bind(tenantId).first<{ revision: number }>();
   return Number(row?.revision ?? 0);
 }
 
-async function latestCompletedAt(revision: number) {
+async function latestCompletedAt(tenantId: string, revision: number) {
   const row = await database().prepare(`SELECT completed_at AS completedAt FROM pos_sync_mutations
     WHERE tenant_id = ? AND status = 'completed' AND revision <= ? ORDER BY revision DESC LIMIT 1`)
-    .bind(TENANT_ID, revision).first<{ completedAt: string | null }>();
+    .bind(tenantId, revision).first<{ completedAt: string | null }>();
   return row?.completedAt ?? null;
 }
 
-async function mutation(mutationId: string) {
+async function mutation(tenantId: string, mutationId: string) {
   return database().prepare(`SELECT status, revision, base_revision AS baseRevision, actor_id AS actorId, device_id AS deviceId
     FROM pos_sync_mutations WHERE tenant_id = ? AND mutation_id = ?`)
-    .bind(TENANT_ID, mutationId).first<MutationRow>();
+    .bind(tenantId, mutationId).first<MutationRow>();
 }
 
-export async function authorizeStaff(input: { email: string; displayName: string }): Promise<ServerStaffProfile | null> {
+export async function authorizeStaff(input: { email: string; displayName: string; tenantId: string; marketName: string; role: ServerStaffProfile["role"] }): Promise<ServerStaffProfile | null> {
   await ensureSyncSchema();
   const email = input.email.trim().toLowerCase();
   const displayName = input.displayName.trim().slice(0, 120) || email;
@@ -242,25 +241,26 @@ export async function authorizeStaff(input: { email: string; displayName: string
   const db = database();
   await db.prepare(`INSERT INTO pos_staff
     (tenant_id, actor_id, email, display_name, role, active, created_at, updated_at)
-    SELECT ?, ?, ?, ?, 'owner', 1, ?, ?
-    WHERE NOT EXISTS (SELECT 1 FROM pos_staff WHERE tenant_id = ?)`)
-    .bind(TENANT_ID, actorId, email, displayName, now, now, TENANT_ID).run();
+    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+    ON CONFLICT (tenant_id, actor_id) DO UPDATE SET email = excluded.email, display_name = excluded.display_name,
+      role = excluded.role, active = 1, updated_at = excluded.updated_at`)
+    .bind(input.tenantId, actorId, email, displayName, input.role, now, now).run();
   const row = await db.prepare(`SELECT actor_id AS actorId, email, display_name AS displayName, role, active,
       created_at AS createdAt, updated_at AS updatedAt
     FROM pos_staff WHERE tenant_id = ? AND actor_id = ?`)
-    .bind(TENANT_ID, actorId).first<StaffRow>();
+    .bind(input.tenantId, actorId).first<StaffRow>();
   if (!row || row.active !== 1) return null;
   if (row.displayName !== displayName || row.email !== email) {
     await db.prepare("UPDATE pos_staff SET email = ?, display_name = ?, updated_at = ? WHERE tenant_id = ? AND actor_id = ?")
-      .bind(email, displayName, now, TENANT_ID, actorId).run();
+      .bind(email, displayName, now, input.tenantId, actorId).run();
     row.email = email;
     row.displayName = displayName;
     row.updatedAt = now;
   }
-  return toStaff(row);
+  return { ...toStaff(row), tenantId: input.tenantId, marketName: input.marketName };
 }
 
-async function readRawStateAt(revision: number): Promise<CloudSyncRecord[]> {
+async function readRawStateAt(tenantId: string, revision: number): Promise<CloudSyncRecord[]> {
   if (revision <= 0) return [];
   const result = await database().prepare(`WITH ranked AS (
       SELECT c.store_name AS storeName, c.record_id AS recordId, c.payload_json AS payloadJson,
@@ -272,7 +272,7 @@ async function readRawStateAt(revision: number): Promise<CloudSyncRecord[]> {
     )
     SELECT storeName, recordId, payloadJson, digest, revision
     FROM ranked WHERE rowNumber = 1 ORDER BY storeName, recordId`)
-    .bind(TENANT_ID, revision).all<{
+    .bind(tenantId, revision).all<{
       storeName: SyncStoreName;
       recordId: string;
       payloadJson: string;
@@ -304,19 +304,19 @@ function roleMeta(actor: ServerStaffProfile, revision: number, updatedAt: string
 
 export async function readCloudSyncState(actor: ServerStaffProfile, requestedRevision?: number): Promise<CloudSyncState> {
   await ensureSyncSchema();
-  const latest = await currentRevision();
+  const latest = await currentRevision(actor.tenantId);
   const revision = requestedRevision === undefined ? latest : requestedRevision;
   if (!Number.isInteger(revision) || revision < 0 || revision > latest) throw new SyncConflictError(latest);
   const includedStores = readStoresForRole(actor.role);
   const allowed = new Set(includedStores);
-  const records = (await readRawStateAt(revision)).filter((record) => allowed.has(record.storeName));
-  return { ...roleMeta(actor, revision, await latestCompletedAt(revision)), records, includedStores };
+  const records = (await readRawStateAt(actor.tenantId, revision)).filter((record) => allowed.has(record.storeName));
+  return { ...roleMeta(actor, revision, await latestCompletedAt(actor.tenantId, revision)), records, includedStores };
 }
 
 export async function readCloudSyncMeta(actor: ServerStaffProfile): Promise<CloudSyncMeta> {
   await ensureSyncSchema();
-  const revision = await currentRevision();
-  return roleMeta(actor, revision, await latestCompletedAt(revision));
+  const revision = await currentRevision(actor.tenantId);
+  return roleMeta(actor, revision, await latestCompletedAt(actor.tenantId, revision));
 }
 
 async function diffStates(from: CloudSyncRecord[], to: CloudSyncRecord[], stores: SyncStoreName[]): Promise<CloudSyncChange[]> {
@@ -347,16 +347,16 @@ async function diffStates(from: CloudSyncRecord[], to: CloudSyncRecord[], stores
 
 export async function readCloudSyncDelta(actor: ServerStaffProfile, since: number): Promise<CloudSyncDelta> {
   await ensureSyncSchema();
-  const revision = await currentRevision();
+  const revision = await currentRevision(actor.tenantId);
   if (!Number.isInteger(since) || since < 0 || since > revision) throw new SyncConflictError(revision);
   const includedStores = readStoresForRole(actor.role);
   const [base, current, mergedRow, updatedAt] = await Promise.all([
-    readRawStateAt(since),
-    readRawStateAt(revision),
+    readRawStateAt(actor.tenantId, since),
+    readRawStateAt(actor.tenantId, revision),
     database().prepare(`SELECT COUNT(*) AS count FROM pos_sync_mutations
       WHERE tenant_id = ? AND status = 'completed' AND revision > ? AND base_revision < revision - 1`)
-      .bind(TENANT_ID, since).first<{ count: number }>(),
-    latestCompletedAt(revision),
+      .bind(actor.tenantId, since).first<{ count: number }>(),
+    latestCompletedAt(actor.tenantId, revision),
   ]);
   return {
     ...roleMeta(actor, revision, updatedAt),
@@ -384,7 +384,7 @@ async function registerDevice(input: {
       app_version = excluded.app_version, last_revision = MAX(pos_devices.last_revision, excluded.last_revision),
       pending_count = excluded.pending_count, last_seen_at = excluded.last_seen_at`)
     .bind(
-      TENANT_ID,
+      input.actor.tenantId,
       input.deviceId,
       input.deviceLabel.trim().slice(0, 60) || "کاشێر",
       input.actor.actorId,
@@ -396,11 +396,11 @@ async function registerDevice(input: {
     ).run();
 }
 
-async function incrementDeviceConflict(deviceId: string) {
+async function incrementDeviceConflict(tenantId: string, deviceId: string) {
   if (deviceId === "cloud-restore") return;
   await database().prepare(`UPDATE pos_devices SET conflict_count = conflict_count + 1, last_seen_at = ?
     WHERE tenant_id = ? AND device_id = ?`)
-    .bind(new Date().toISOString(), TENANT_ID, deviceId).run();
+    .bind(new Date().toISOString(), tenantId, deviceId).run();
 }
 
 async function completeDeviceSync(deviceId: string, revision: number, actor: ServerStaffProfile) {
@@ -408,7 +408,7 @@ async function completeDeviceSync(deviceId: string, revision: number, actor: Ser
   await database().prepare(`UPDATE pos_devices SET actor_id = ?, actor_name = ?, app_version = ?,
       last_revision = ?, pending_count = 0, last_seen_at = ?
     WHERE tenant_id = ? AND device_id = ?`)
-    .bind(actor.actorId, actor.displayName, POS_APP_VERSION, revision, new Date().toISOString(), TENANT_ID, deviceId).run();
+    .bind(actor.actorId, actor.displayName, POS_APP_VERSION, revision, new Date().toISOString(), actor.tenantId, deviceId).run();
 }
 
 export async function startSyncMutation(input: {
@@ -422,27 +422,27 @@ export async function startSyncMutation(input: {
 }) {
   await ensureSyncSchema();
   await registerDevice(input);
-  const existing = await mutation(input.mutationId);
+  const existing = await mutation(input.actor.tenantId, input.mutationId);
   if (existing) {
     if (existing.actorId !== input.actor.actorId) throw new Error("SYNC_MUTATION_ACCESS_DENIED");
     return { status: existing.status, revision: existing.revision };
   }
-  const revision = await currentRevision();
+  const revision = await currentRevision(input.actor.tenantId);
   if (input.baseRevision > revision) throw new SyncConflictError(revision);
   await database().prepare(`INSERT OR IGNORE INTO pos_sync_mutations
     (tenant_id, mutation_id, base_revision, revision, status, device_id, actor_id, started_at, completed_at)
     VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, NULL)`)
-    .bind(TENANT_ID, input.mutationId, input.baseRevision, input.deviceId, input.actor.actorId, new Date().toISOString()).run();
-  const created = await mutation(input.mutationId);
+    .bind(input.actor.tenantId, input.mutationId, input.baseRevision, input.deviceId, input.actor.actorId, new Date().toISOString()).run();
+  const created = await mutation(input.actor.tenantId, input.mutationId);
   if (!created || created.actorId !== input.actor.actorId) throw new Error("SYNC_START_FAILED");
   return { status: created.status, revision: created.revision };
 }
 
-async function stagedChanges(mutationId: string): Promise<CloudSyncChange[]> {
+async function stagedChanges(tenantId: string, mutationId: string): Promise<CloudSyncChange[]> {
   const rows = await database().prepare(`SELECT store_name AS storeName, record_id AS recordId,
       payload_json AS payloadJson, digest FROM pos_sync_changes
     WHERE tenant_id = ? AND mutation_id = ? ORDER BY store_name, record_id`)
-    .bind(TENANT_ID, mutationId).all<{ storeName: SyncStoreName; recordId: string; payloadJson: string; digest: string }>();
+    .bind(tenantId, mutationId).all<{ storeName: SyncStoreName; recordId: string; payloadJson: string; digest: string }>();
   return rows.results.map((row) => {
     const payload = JSON.parse(row.payloadJson) as Record<string, unknown>;
     return {
@@ -457,7 +457,7 @@ async function stagedChanges(mutationId: string): Promise<CloudSyncChange[]> {
 
 export async function stageSyncChanges(actor: ServerStaffProfile, mutationId: string, changes: CloudSyncChange[]) {
   await ensureSyncSchema();
-  const current = await mutation(mutationId);
+  const current = await mutation(actor.tenantId, mutationId);
   if (!current) throw new Error("SYNC_MUTATION_NOT_FOUND");
   if (current.actorId !== actor.actorId) throw new Error("SYNC_MUTATION_ACCESS_DENIED");
   if (current.status === "completed") return { accepted: changes.length, completed: true };
@@ -478,7 +478,7 @@ export async function stageSyncChanges(actor: ServerStaffProfile, mutationId: st
       VALUES (?, ?, ?, ?, 'upsert', ?, ?)
       ON CONFLICT (tenant_id, mutation_id, store_name, record_id)
       DO UPDATE SET payload_json = excluded.payload_json, digest = excluded.digest`)
-      .bind(TENANT_ID, mutationId, change.storeName, change.recordId, JSON.stringify(change.payload), change.digest)));
+      .bind(actor.tenantId, mutationId, change.storeName, change.recordId, JSON.stringify(change.payload), change.digest)));
   }
   return { accepted: verified.length, completed: false };
 }
@@ -529,7 +529,7 @@ async function syncStaffFromUsers(actor: ServerStaffProfile, records: CloudSyncR
         email = excluded.email, display_name = excluded.display_name, role = excluded.role,
         active = excluded.active, updated_at = excluded.updated_at`)
       .bind(
-        TENANT_ID,
+        actor.tenantId,
         actorId,
         email,
         String(user.payload.name ?? email).slice(0, 120),
@@ -544,7 +544,7 @@ async function syncStaffFromUsers(actor: ServerStaffProfile, records: CloudSyncR
   }
 }
 
-async function saveRestorePoint(revision: number, recordCount: number, now: string) {
+async function saveRestorePoint(tenantId: string, revision: number, recordCount: number, now: string) {
   const day = now.slice(0, 10);
   const db = database();
   await db.batch([
@@ -552,18 +552,18 @@ async function saveRestorePoint(revision: number, recordCount: number, now: stri
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (tenant_id, day) DO UPDATE SET
         revision = excluded.revision, record_count = excluded.record_count, created_at = excluded.created_at`)
-      .bind(TENANT_ID, day, revision, recordCount, now),
+      .bind(tenantId, day, revision, recordCount, now),
     db.prepare(`DELETE FROM pos_restore_points WHERE tenant_id = ? AND day NOT IN (
       SELECT day FROM pos_restore_points WHERE tenant_id = ? ORDER BY day DESC LIMIT 30
-    )`).bind(TENANT_ID, TENANT_ID),
+    )`).bind(tenantId, tenantId),
   ]);
 }
 
-async function stageMergedChanges(mutationId: string, changes: CloudSyncChange[]) {
+async function stageMergedChanges(tenantId: string, mutationId: string, changes: CloudSyncChange[]) {
   const db = database();
   await db.prepare(`DELETE FROM pos_sync_changes WHERE tenant_id = ? AND mutation_id = ? AND EXISTS (
     SELECT 1 FROM pos_sync_mutations WHERE tenant_id = ? AND mutation_id = ? AND status = 'pending'
-  )`).bind(TENANT_ID, mutationId, TENANT_ID, mutationId).run();
+  )`).bind(tenantId, mutationId, tenantId, mutationId).run();
   for (let offset = 0; offset < changes.length; offset += 75) {
     const chunk = changes.slice(offset, offset + 75);
     await db.batch(chunk.map((change) => {
@@ -575,12 +575,13 @@ async function stageMergedChanges(mutationId: string, changes: CloudSyncChange[]
         )
         ON CONFLICT (tenant_id, mutation_id, store_name, record_id)
         DO UPDATE SET payload_json = excluded.payload_json, digest = excluded.digest`)
-        .bind(TENANT_ID, mutationId, change.storeName, change.recordId, JSON.stringify(payload), change.digest, TENANT_ID, mutationId);
+        .bind(tenantId, mutationId, change.storeName, change.recordId, JSON.stringify(payload), change.digest, tenantId, mutationId);
     }));
   }
 }
 
 async function completePendingMutation(input: {
+  tenantId: string;
   mutationId: string;
   currentRevision: number;
   nextRevision: number;
@@ -591,22 +592,22 @@ async function completePendingMutation(input: {
     WHERE tenant_id = ? AND mutation_id = ? AND status = 'pending' AND ? = (
       SELECT COALESCE(MAX(revision), 0) FROM pos_sync_mutations WHERE tenant_id = ? AND status = 'completed'
     ) RETURNING revision`)
-    .bind(input.nextRevision, input.completedAt, TENANT_ID, input.mutationId, input.currentRevision, TENANT_ID)
+    .bind(input.nextRevision, input.completedAt, input.tenantId, input.mutationId, input.currentRevision, input.tenantId)
     .first<{ revision?: number }>();
   return Number(completed?.revision ?? 0) === input.nextRevision;
 }
 
 export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId: string) {
   await ensureSyncSchema();
-  const existing = await mutation(mutationId);
+  const existing = await mutation(actor.tenantId, mutationId);
   if (!existing) throw new Error("SYNC_MUTATION_NOT_FOUND");
   if (existing.actorId !== actor.actorId) throw new Error("SYNC_MUTATION_ACCESS_DENIED");
   if (existing.status === "completed") return { revision: Number(existing.revision), merged: existing.baseRevision < Number(existing.revision) - 1 };
-  const localChanges = await stagedChanges(mutationId);
+  const localChanges = await stagedChanges(actor.tenantId, mutationId);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const latest = await currentRevision();
-    const [base, remote] = await Promise.all([readRawStateAt(existing.baseRevision), readRawStateAt(latest)]);
+    const latest = await currentRevision(actor.tenantId);
+    const [base, remote] = await Promise.all([readRawStateAt(actor.tenantId, existing.baseRevision), readRawStateAt(actor.tenantId, latest)]);
     const local = applyChanges(base, localChanges);
     let mergedRecords: CloudSyncRecord[];
     if (latest === existing.baseRevision) {
@@ -619,7 +620,7 @@ export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId
         writableStores: writeStoresForRole(actor.role),
       });
       if (merged.conflicts.length) {
-        await incrementDeviceConflict(existing.deviceId);
+        await incrementDeviceConflict(actor.tenantId, existing.deviceId);
         throw new SyncMergeConflictError(latest, merged.conflicts.slice(0, 12));
       }
       mergedRecords = await ensureDigests(merged.records);
@@ -630,15 +631,16 @@ export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId
     const changes = await diffStates(remote, mergedRecords, [...SYNC_STORE_NAMES]);
     const completedAt = new Date().toISOString();
     try {
-      if (latest !== existing.baseRevision) await stageMergedChanges(mutationId, changes);
+      if (latest !== existing.baseRevision) await stageMergedChanges(actor.tenantId, mutationId, changes);
       const completed = await completePendingMutation({
+        tenantId: actor.tenantId,
         mutationId,
         currentRevision: latest,
         nextRevision: latest + 1,
         completedAt,
       });
       if (!completed) {
-        const raced = await mutation(mutationId);
+        const raced = await mutation(actor.tenantId, mutationId);
         if (raced?.status === "completed") return {
           revision: Number(raced.revision),
           merged: existing.baseRevision < Number(raced.revision) - 1,
@@ -647,12 +649,12 @@ export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId
       }
       await Promise.all([
         syncStaffFromUsers(actor, mergedRecords),
-        saveRestorePoint(latest + 1, mergedRecords.length, completedAt),
+        saveRestorePoint(actor.tenantId, latest + 1, mergedRecords.length, completedAt),
         completeDeviceSync(existing.deviceId, latest + 1, actor),
       ]);
       return { revision: latest + 1, merged: latest > existing.baseRevision };
     } catch (error) {
-      const raced = await mutation(mutationId);
+      const raced = await mutation(actor.tenantId, mutationId);
       if (raced?.status === "completed") return {
         revision: Number(raced.revision),
         merged: existing.baseRevision < Number(raced.revision) - 1,
@@ -660,7 +662,7 @@ export async function finalizeSyncMutation(actor: ServerStaffProfile, mutationId
       if (attempt === 2) throw error;
     }
   }
-  throw new SyncConflictError(await currentRevision());
+  throw new SyncConflictError(await currentRevision(actor.tenantId));
 }
 
 export async function readProductionStatus(actor: ServerStaffProfile): Promise<ProductionStatus> {
@@ -668,18 +670,18 @@ export async function readProductionStatus(actor: ServerStaffProfile): Promise<P
   const elevated = actor.role === "owner" || actor.role === "manager";
   const db = database();
   const [revision, devicesResult, restoreResult, staffResult] = await Promise.all([
-    currentRevision(),
+    currentRevision(actor.tenantId),
     db.prepare(`SELECT device_id AS deviceId, label, actor_id AS actorId, actor_name AS actorName,
         app_version AS appVersion, last_revision AS lastRevision, pending_count AS pendingCount,
         conflict_count AS conflictCount, last_seen_at AS lastSeenAt
       FROM pos_devices WHERE tenant_id = ? ${elevated ? "" : "AND actor_id = ?"} ORDER BY last_seen_at DESC`)
-      .bind(...(elevated ? [TENANT_ID] : [TENANT_ID, actor.actorId])).all<ProductionStatus["devices"][number]>(),
+      .bind(...(elevated ? [actor.tenantId] : [actor.tenantId, actor.actorId])).all<ProductionStatus["devices"][number]>(),
     db.prepare("SELECT day, revision, record_count AS recordCount, created_at AS createdAt FROM pos_restore_points WHERE tenant_id = ? ORDER BY day DESC LIMIT 30")
-      .bind(TENANT_ID).all<ProductionStatus["restorePoints"][number]>(),
+      .bind(actor.tenantId).all<ProductionStatus["restorePoints"][number]>(),
     db.prepare(`SELECT actor_id AS actorId, email, display_name AS displayName, role, active,
         created_at AS createdAt, updated_at AS updatedAt FROM pos_staff
       WHERE tenant_id = ? ${elevated ? "" : "AND actor_id = ?"} ORDER BY display_name`)
-      .bind(...(elevated ? [TENANT_ID] : [TENANT_ID, actor.actorId])).all<StaffRow>(),
+      .bind(...(elevated ? [actor.tenantId] : [actor.tenantId, actor.actorId])).all<StaffRow>(),
   ]);
   return {
     actor,
@@ -696,7 +698,7 @@ export async function readProductionStatus(actor: ServerStaffProfile): Promise<P
       revision: Number(point.revision),
       recordCount: Number(point.recordCount),
     })),
-    staff: staffResult.results.map(toStaff),
+    staff: staffResult.results.map((row) => ({ ...toStaff(row), tenantId: actor.tenantId, marketName: actor.marketName })),
     appVersion: POS_APP_VERSION,
   };
 }
@@ -704,9 +706,9 @@ export async function readProductionStatus(actor: ServerStaffProfile): Promise<P
 export async function restoreCloudRevision(actor: ServerStaffProfile, targetRevision: number) {
   if (actor.role !== "owner") throw new Error("RESTORE_OWNER_REQUIRED");
   await ensureSyncSchema();
-  const latest = await currentRevision();
+  const latest = await currentRevision(actor.tenantId);
   if (!Number.isInteger(targetRevision) || targetRevision < 0 || targetRevision >= latest) throw new Error("RESTORE_REVISION_INVALID");
-  const [current, target] = await Promise.all([readRawStateAt(latest), readRawStateAt(targetRevision)]);
+  const [current, target] = await Promise.all([readRawStateAt(actor.tenantId, latest), readRawStateAt(actor.tenantId, targetRevision)]);
   const changes = await diffStates(current, target, [...SYNC_STORE_NAMES]);
   const mutationId = `restore_${crypto.randomUUID()}`;
   await startSyncMutation({
