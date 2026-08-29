@@ -75,7 +75,6 @@ jobs:
           if($p.HasExited){throw "Cashier startup smoke failed; exit=$($p.ExitCode)"}
           $results.Add("PASS Cashier process alive after 7 seconds PID=$($p.Id)")
           Stop-Process -Id $p.Id -Force
-          # Admin is expected to remain at LoginWindow without user input.
           $admin=Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
           $p2=Start-Process $admin -PassThru -WorkingDirectory (Split-Path $admin)
           Start-Sleep -Seconds 7
@@ -93,9 +92,13 @@ jobs:
           if($cash -notmatch 'if \(movementKind == MovementKind\.Sale\)\s*SafeOpenDrawer\(\)'){throw 'Sale-only drawer guard missing.'}
           if($cash -notmatch 'movementKind == MovementKind\.Sale'){throw 'Movement guard missing.'}
           $parser=Get-Content (Join-Path $root 'src/ZhiroxPOS.Core/Services/ScaleBarcodeParser.cs') -Raw
-          if($parser -notmatch '1000'){throw 'Scale divisor evidence missing.'}
+          $constants=Get-Content (Join-Path $root 'src/ZhiroxPOS.Core/LegacyConstants.cs') -Raw
+          if($parser -notmatch 'ScaleDivisor'){throw 'Scale parser does not reference ScaleDivisor.'}
+          if($constants -notmatch 'ScaleDivisor\s*=\s*1000'){throw 'ScaleDivisor=1000 constant missing.'}
+          if($constants -notmatch 'ScaleItemCodeInclusiveMax\s*=\s*2701000'){throw 'Scale item range constant missing.'}
           'PASS return drawer sale-only guard' | Set-Content safety.txt
-          'PASS scale parser constants present' | Add-Content safety.txt
+          'PASS scale parser references ScaleDivisor' | Add-Content safety.txt
+          'PASS ScaleDivisor=1000 and scale range constants' | Add-Content safety.txt
 
       - name: Produce self-test report
         shell: pwsh
@@ -110,12 +113,13 @@ jobs:
             "Admin SHA256: $((Get-FileHash $admin -Algorithm SHA256).Hash.ToLowerInvariant())",
             "Cashier SHA256: $((Get-FileHash $cashier -Algorithm SHA256).Hash.ToLowerInvariant())",
             'PASS: MSBuild Release',
-            'PASS: Golden Replay',
+            'PASS: Golden Replay 10/10',
             'PASS: PE integrity',
             'PASS: all XAML parse',
             'PASS: Cashier WPF process remained alive after startup smoke',
             'PASS: Admin WPF process remained alive at LoginWindow after startup smoke',
             'PASS: return drawer sale-only source guard',
+            'PASS: scale divisor/range source constants',
             'LIMITATION: no physical printer/drawer/scale/customer-display is attached to GitHub Windows runner',
             'LIMITATION: original private SQL BAK was not uploaded to public GitHub and therefore was not restored in this run'
           )
