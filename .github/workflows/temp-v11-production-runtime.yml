@@ -1,0 +1,182 @@
+name: temp-v11-production-runtime
+on:
+  push:
+    branches:
+      - temp-kanychnar-v11-exe-build
+permissions:
+  contents: read
+  actions: read
+jobs:
+  runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CRC-verified recovered source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh api "/repos/${{ github.repository }}/actions/artifacts/9712881575/zip" > v11-recovered-source.zip
+          Expand-Archive -LiteralPath v11-recovered-source.zip -DestinationPath recovered-artifact -Force
+          if (-not (Test-Path 'recovered-artifact/recovered/KanyChnarPOS.sln')) { throw 'Recovered source artifact is invalid.' }
+
+      - name: Overlay reconstructed 13 files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64 = (Get-Content -LiteralPath 'temp-reconstructed-v11/reconstructed-13.zip.b64' -Raw).Trim()
+          [IO.File]::WriteAllBytes('reconstructed-13.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash -LiteralPath 'reconstructed-13.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '1f038285eec578183e81e0f21783e2246f2570821e449cf37bf230923caeda1e') { throw "Reconstruction bundle SHA mismatch: $hash" }
+          Expand-Archive -LiteralPath 'reconstructed-13.zip' -DestinationPath 'recovered-artifact/recovered' -Force
+          $missing = Get-Content -LiteralPath 'recovered-artifact/missing.txt' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          foreach ($rel in $missing) {
+            $p = Join-Path 'recovered-artifact/recovered' $rel
+            if (-not (Test-Path -LiteralPath $p)) { throw "Still missing: $rel" }
+          }
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild.exe not found.' }
+          & $msbuild (Join-Path $root 'KanyChnarPOS.sln') /m /t:Restore,Build /p:Configuration=Release "/p:Platform=Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $LASTEXITCODE" }
+
+      - name: Validate EXEs and Golden Replay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $admin = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $cashier = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          $verify = Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/net48/VerifyGolden.exe'
+          foreach ($exe in @($admin,$cashier,$verify)) {
+            if (-not (Test-Path -LiteralPath $exe)) { throw "Compiled EXE missing: $exe" }
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            if ($bytes.Length -lt 1024 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "Invalid PE executable: $exe" }
+          }
+          & $verify
+          if ($LASTEXITCODE -ne 0) { throw "Golden Replay failed: $LASTEXITCODE" }
+
+      - name: Stage production runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $adminOut = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48'
+          $cashierOut = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48'
+          $stage = 'KanyChnar_POS_V11_Production_Runtime'
+          New-Item -ItemType Directory -Force -Path "$stage/Admin","$stage/Cashier","$stage/Tools" | Out-Null
+
+          Get-ChildItem -LiteralPath $adminOut -File | Where-Object { $_.Extension -in '.exe','.dll','.config' } | Copy-Item -Destination "$stage/Admin" -Force
+          Get-ChildItem -LiteralPath $cashierOut -File | Where-Object { $_.Extension -in '.exe','.dll','.config' } | Copy-Item -Destination "$stage/Cashier" -Force
+
+          @'
+          param([switch]$TestDatabase)
+          $ErrorActionPreference = 'Stop'
+          $root = Split-Path -Parent $PSScriptRoot
+          $errors = New-Object System.Collections.Generic.List[string]
+          $warnings = New-Object System.Collections.Generic.List[string]
+
+          if ($env:OS -ne 'Windows_NT') { $errors.Add('Windows is required.') }
+
+          try {
+            $release = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -Name Release -ErrorAction Stop).Release
+            if ($release -lt 528040) { $errors.Add(".NET Framework 4.8 or later is required. Release=$release") }
+          } catch { $errors.Add('.NET Framework 4.8 registry key was not found.') }
+
+          $required = @(
+            'Admin\Admin.exe','Admin\Admin.exe.config','Admin\ZhiroxPOS.Core.dll','Admin\ZhiroxPOS.Data.dll','Admin\ZhiroxPOS.Hardware.dll',
+            'Cashier\Cashier.exe','Cashier\Cashier.exe.config','Cashier\ZhiroxPOS.Core.dll','Cashier\ZhiroxPOS.Data.dll','Cashier\ZhiroxPOS.Hardware.dll'
+          )
+          foreach ($rel in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $rel))) { $errors.Add("Missing runtime file: $rel") }
+          }
+
+          foreach ($cfgRel in @('Admin\Admin.exe.config','Cashier\Cashier.exe.config')) {
+            $cfg = Join-Path $root $cfgRel
+            if (Test-Path -LiteralPath $cfg) {
+              [xml]$xml = Get-Content -LiteralPath $cfg -Raw
+              $node = @($xml.configuration.connectionStrings.add) | Where-Object { $_.name -eq 'GoldenDatabase' } | Select-Object -First 1
+              if (-not $node) { $errors.Add("GoldenDatabase connection string missing: $cfgRel") }
+              elseif ([string]::IsNullOrWhiteSpace([string]$node.connectionString)) { $errors.Add("GoldenDatabase connection string empty: $cfgRel") }
+              elseif ($TestDatabase) {
+                try {
+                  $cn = New-Object System.Data.SqlClient.SqlConnection([string]$node.connectionString)
+                  $cn.Open()
+                  $cmd = $cn.CreateCommand(); $cmd.CommandText = 'SELECT 1'; $null = $cmd.ExecuteScalar(); $cn.Close()
+                  Write-Host "Database PASS: $cfgRel" -ForegroundColor Green
+                } catch { $errors.Add("Database test failed for $cfgRel : $($_.Exception.Message)") }
+              }
+            }
+          }
+
+          $printers = @(Get-CimInstance Win32_Printer -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+          if ($printers.Count -eq 0) { $warnings.Add('No Windows printers detected. Printer/hardware QA is still required.') }
+
+          if ($warnings.Count) {
+            Write-Host 'WARNINGS:' -ForegroundColor Yellow
+            $warnings | ForEach-Object { Write-Host " - $_" -ForegroundColor Yellow }
+          }
+          if ($errors.Count) {
+            Write-Host 'FAILURES:' -ForegroundColor Red
+            $errors | ForEach-Object { Write-Host " - $_" -ForegroundColor Red }
+            exit 1
+          }
+          Write-Host 'RUNTIME PREFLIGHT PASS' -ForegroundColor Green
+          '@ | Set-Content -LiteralPath "$stage/Tools/ProductionPreflight.ps1" -Encoding UTF8
+
+          @'
+          KANY CHNAR / ZHIROX POS V11 - PRODUCTION RUNTIME
+          ==================================================
+
+          This package contains the compiled Windows runtime dependencies for:
+            Admin\Admin.exe
+            Cashier\Cashier.exe
+
+          BEFORE OFFICIAL BUSINESS USE:
+          1. Edit Admin\Admin.exe.config and Cashier\Cashier.exe.config for the real SQL Server/database.
+          2. Run: powershell -ExecutionPolicy Bypass -File Tools\ProductionPreflight.ps1 -TestDatabase
+          3. Restore/verify the real SQL Server database and run production data checks.
+          4. Test receipt printer, barcode printer, cash drawer, scale and customer display physically.
+          5. Verify Code39/EAN13 fonts and printed barcode readability.
+
+          Build gates already passed in Windows CI:
+          - MSBuild Release
+          - Admin.exe PE validation
+          - Cashier.exe PE validation
+          - VerifyGolden.exe / Golden Replay
+          - Return-drawer sale guard source check
+
+          IMPORTANT:
+          This is a production-runtime candidate. Physical SQL/hardware acceptance remains required before declaring official production readiness.
+          '@ | Set-Content -LiteralPath "$stage/READ_FIRST.txt" -Encoding UTF8
+
+          $manifest = Get-ChildItem -LiteralPath $stage -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $rel = $_.FullName.Substring((Resolve-Path $stage).Path.Length).TrimStart('\')
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $rel"
+          }
+          $manifest | Set-Content -LiteralPath "$stage/SHA256SUMS.txt" -Encoding ASCII
+
+          $admin = Join-Path $stage 'Admin/Admin.exe'
+          $cashier = Join-Path $stage 'Cashier/Cashier.exe'
+          foreach ($exe in @($admin,$cashier)) {
+            $b = [IO.File]::ReadAllBytes($exe)
+            if ($b[0] -ne 0x4D -or $b[1] -ne 0x5A) { throw "PE validation failed in staged package: $exe" }
+          }
+          Write-Host 'Production runtime staging: PASS'
+
+      - name: Upload production runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-POS-V11-Production-Runtime
+          path: KanyChnar_POS_V11_Production_Runtime/**
+          if-no-files-found: error
+          retention-days: 2
