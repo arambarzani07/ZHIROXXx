@@ -4,60 +4,119 @@ on:
     branches:
       - temp-kanychnar-v11-exe-build
 jobs:
-  diagnose:
+  recover:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Recover chunk014 and chunk015 source entries
+      - name: Merge CRC-verified V11 source files
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           @'
-          import base64, pathlib, struct, zlib, binascii
-          root=pathlib.Path('temp-build-v11p')
-          alpha=set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
-          def rd(i):
-              s=''.join((root/f'chunk{i:03d}.b64').read_text().split())
-              return ''.join(c for c in s if c in alpha)
-          c14=rd(14); c15=rd(15)
-          print('LENS',len(c14),len(c15))
-          assert len(c14)==16002 and len(c15)==8320
-          def scan(b):
-              found=[]; start=0
+          import base64, pathlib, struct, zlib, binascii, shutil
+          OUT=pathlib.Path('recovered')
+          if OUT.exists(): shutil.rmtree(OUT)
+          OUT.mkdir()
+          ALPHA=set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+          def clean(path):
+              s=''.join(pathlib.Path(path).read_text().split())
+              return ''.join(c for c in s if c in ALPHA)
+          def inflate(b,p):
+              if b[p:p+4]!=b'PK\x03\x04' or p+30>len(b): return None
+              try: ver,flags,method,mt,md,crc,cs,us,fn,xl=struct.unpack_from('<5H3I2H',b,p+4)
+              except: return None
+              if fn<1 or fn>1000 or xl>10000 or cs>10000000: return None
+              name=b[p+30:p+30+fn].decode('utf-8','replace'); ds=p+30+fn+xl; end=ds+cs
+              if end>len(b): return None
+              try:
+                  comp=b[ds:end]; raw=comp if method==0 else zlib.decompress(comp,-15) if method==8 else None
+              except: return None
+              if raw is None or len(raw)!=us or (binascii.crc32(raw)&0xffffffff)!=crc:return None
+              return name,raw,end
+          PREFIX='KanyChnar_POS_Rebuild_V11_OneClick_EXE_Builder/'
+          def norm(name):
+              if name.startswith(PREFIX):name=name[len(PREFIX):]
+              return name.replace('\\','/')
+          origins={}
+          def save(name,raw,origin):
+              name=norm(name)
+              if not (name.startswith('src/') or name.endswith('.sln')):return
+              p=OUT/name;p.parent.mkdir(parents=True,exist_ok=True)
+              if p.exists() and p.read_bytes()!=raw:print('VERSION_DIFFERENCE',name,origins.get(name),origin)
+              p.write_bytes(raw);origins[name]=origin
+          def scan_block(text,origin):
+              if not text:return
+              text=text[:len(text)//4*4]
+              try:b=base64.b64decode(text,validate=True)
+              except Exception as e:print(origin,'DECODE_FAIL',e);return
+              pos=0;count=0
               while True:
-                  p=b.find(b'PK\x03\x04',start)
-                  if p<0: break
-                  start=p+1
-                  if p+30>len(b): continue
-                  try: ver,flags,method,mt,md,crc,cs,us,fn,xl=struct.unpack_from('<5H3I2H',b,p+4)
-                  except: continue
-                  if fn<1 or fn>1000 or xl>10000 or cs>10000000: continue
-                  ds=p+30+fn+xl; end=ds+cs
-                  if end>len(b): continue
-                  name=b[p+30:p+30+fn].decode('utf-8','replace')
-                  try:
-                      comp=b[ds:end]
-                      raw=comp if method==0 else zlib.decompress(comp,-15) if method==8 else None
-                      if raw is None or len(raw)!=us or (binascii.crc32(raw)&0xffffffff)!=crc: continue
-                  except: continue
-                  found.append((p,end,name,len(raw)))
-              return found
-          best=(-1,-1,-1,None)
-          ties=[]
-          for pos in range(len(c14)-1):
-              r=c14[:pos]+c14[pos+2:]
-              try: b=base64.b64decode(r+c15,validate=True)
-              except: continue
-              f=scan(b)
-              score=(len(f),sum(x[3] for x in f),max([x[1] for x in f],default=0))
-              if score>best[:3]: best=(*score,pos); ties=[(pos,f)]
-              elif score==best[:3]: ties.append((pos,f))
-          print('BEST',best,'TIES',len(ties),'POSITIONS',[x[0] for x in ties[:40]])
-          pos,found=ties[0]
-          r=c14[:pos]+c14[pos+2:]
-          b=base64.b64decode(r+c15,validate=True)
-          print('REPAIR_POS',pos,'BLOCK_BYTES',len(b),'GLOBAL_BASE',168000)
-          for p,e,n,usize in found:
-              print(f'RECOVER {168000+p:8d}..{168000+e:8d} {usize:6d} {n}')
-          '@ | Set-Content recover_1415.py -Encoding UTF8
-          python recover_1415.py
+                  q=b.find(b'PK\x03\x04',pos)
+                  if q<0:break
+                  pos=q+1;rec=inflate(b,q)
+                  if rec:save(rec[0],rec[1],origin);count+=1
+              print(origin,'RECOVERED',count)
+          def scan_seq(text,origin):
+              b=base64.b64decode(text,validate=True);p=0;count=0
+              while True:
+                  rec=inflate(b,p)
+                  if not rec:break
+                  save(rec[0],rec[1],origin);p=rec[2];count+=1
+              print(origin,'SEQ',count,'END',p)
+
+          # Minimal archive with intact central directory and four placeholder holes.
+          M=pathlib.Path('temp-min-v11')
+          a0=clean(M/'chunk000.b64');a1=clean(M/'chunk001.b64');a23=clean(M/'chunk002-003.b64')
+          a45=clean(M/'chunk004-005.b64');a67=clean(M/'chunk006-007.b64');a8=clean(M/'chunk008.b64')
+          a10=clean(M/'chunk010.b64');a11=clean(M/'chunk011.b64');a12=clean(M/'chunk012.b64')
+          def repair_join(s):
+              extra=len(s)-20000
+              if extra<0:raise RuntimeError(('short join',len(s)))
+              return s[:10000]+s[10000+extra:]
+          a45=repair_join(a45);a67=repair_join(a67)
+          mb64=(a0+a1+a23[:5000]+'A'*22000+a23[5000:]+a45[:10000]+'A'*12000+a45[10000:]+a67[:10000]+'A'*12000+a67[10000:]+a8+'A'*16000+a10+a11+a12)
+          assert len(mb64)==206056
+          mb=base64.b64decode(mb64);eocd=mb.rfind(b'PK\x05\x06');assert eocd>=0
+          _,_,_,total,cdsize,cdoff,_=struct.unpack_from('<HHHHIIH',mb,eocd+4)
+          central=[];p=cdoff
+          for i in range(total):
+              assert mb[p:p+4]==b'PK\x01\x02'
+              f=struct.unpack_from('<6H3I5H2I',mb,p+4);fn,xl,cl,loff=f[9],f[10],f[11],f[15]
+              name=mb[p+46:p+46+fn].decode('utf-8','replace');central.append((loff,name));p+=46+fn+xl+cl
+          central.sort();holes=[(27750,44250),(55500,64500),(79500,88500),(108000,120000)]
+          for i,(loff,name) in enumerate(central):
+              end=central[i+1][0] if i+1<len(central) else cdoff
+              if any(loff<he and end>hs for hs,he in holes):continue
+              rec=inflate(mb,loff)
+              if rec:save(rec[0],rec[1],'minimal')
+
+          S=pathlib.Path('temp-build-v11p')
+          def sr(i):
+              p=S/f'chunk{i:03d}.b64';return clean(p) if p.exists() else None
+          c=[sr(i) for i in range(9)];c4=c[4][:-1];c7=c[7][:10278]+c[7][10282:]
+          scan_seq(''.join(c[:4])+c4+c[5]+c[6]+c7+c[8],'secondary-prefix')
+          scan_block(sr(8),'secondary-008');scan_block(sr(9),'secondary-009');scan_block(sr(10),'secondary-010')
+          c12,c13,c14,c15=sr(12),sr(13),sr(14),sr(15)
+          c14r=c14[:16000] if c14 and len(c14)==16002 else c14
+          if c12 and c13:scan_block(c12+c13,'secondary-012-013')
+          if c12 and c13 and c14r:scan_block(c12+c13+c14r,'secondary-012-014')
+          if c14r and c15:scan_block(c14r+c15,'secondary-014-015')
+          scan_block(sr(16),'secondary-016')
+
+          expected=[norm(n) for _,n in central if norm(n).startswith('src/') or norm(n).endswith('.sln')]
+          present={str(x.relative_to(OUT)).replace('\\','/') for x in OUT.rglob('*') if x.is_file()}
+          missing=[n for n in expected if n not in present]
+          print('EXPECTED',len(expected),'RECOVERED',len(present),'MISSING',len(missing))
+          for n in missing:print('MISSING',n)
+          pathlib.Path('missing.txt').write_text('\n'.join(missing),encoding='utf-8')
+          '@ | Set-Content recover.py -Encoding UTF8
+          python recover.py
+      - name: Upload recovered source tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: v11-recovered-source
+          path: |
+            recovered/**
+            missing.txt
+          if-no-files-found: error
+          retention-days: 2
