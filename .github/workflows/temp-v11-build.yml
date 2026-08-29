@@ -8,46 +8,78 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Scan secondary payload
+      - name: Recover inserted Base64 chars and scan ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           @'
-          import base64, pathlib, re, struct, zlib
+          import base64, pathlib, struct, zlib, binascii
 
           root=pathlib.Path('temp-build-v11p')
-          names=['chunk000.b64','chunk001.b64','chunk002.b64','chunk003.b64','chunk004.b64','chunk005.b64','chunk006.b64','chunk007.b64','chunk008.b64','chunk009.b64']
-          parts=[]
-          for n in names:
-              s=''.join((root/n).read_text().split())
-              bad=[(i,c,ord(c)) for i,c in enumerate(s) if c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=']
-              print(n,'LEN',len(s),'MOD4',len(s)%4,'BAD',bad[:20])
-              # Strip only non-base64 display markers. For chunks with extra base64-valid chars,
-              # preserve the longest prefix that maintains the expected 16000-char boundary.
-              s=''.join(c for c in s if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
-              if n in ('chunk004.b64','chunk007.b64') and len(s)>16000:
-                  # test simple removal candidates near boundary/middle later; print context first
-                  print(n,'EXTRA',len(s)-16000,'HEAD',s[:40],'TAIL',s[-40:])
-              parts.append(s)
+          def rd(i):
+              s=''.join((root/f'chunk{i:03d}.b64').read_text().split())
+              return ''.join(c for c in s if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+          chunks={i:rd(i) for i in range(10)}
+          print('LENS', {i:len(v) for i,v in chunks.items()})
 
-          # Build a conservative prefix only through fully clean chunks 000-003.
-          prefix=''.join(parts[:4])
-          assert len(prefix)==64000, len(prefix)
-          b=base64.b64decode(prefix)
-          print('PREFIX_BYTES',len(b))
+          def scan_bytes(b, verify=True):
+              p=0; count=0; names=[]
+              while p+30 <= len(b) and b[p:p+4]==b'PK\x03\x04':
+                  ver,flags,method,mt,md,crc,csize,usize,fnlen,xlen=struct.unpack_from('<5H3I2H',b,p+4)
+                  if fnlen>1000 or xlen>10000 or csize>10_000_000: break
+                  name=b[p+30:p+30+fnlen].decode('utf-8','replace')
+                  ds=p+30+fnlen+xlen; end=ds+csize
+                  if end>len(b): break
+                  if verify:
+                      comp=b[ds:end]
+                      try:
+                          if method==0: out=comp
+                          elif method==8: out=zlib.decompress(comp,-15)
+                          else: break
+                          if len(out)!=usize or (binascii.crc32(out)&0xffffffff)!=crc: break
+                      except Exception:
+                          break
+                  names.append((p,end,name,csize,usize)); p=end; count+=1
+              return p,count,names
 
-          # Sequentially parse local ZIP records available in intact prefix.
-          p=0; count=0
-          print('RECOVERABLE_ENTRIES_FROM_CLEAN_PREFIX:')
-          while p+30 <= len(b) and b[p:p+4]==b'PK\x03\x04':
-              ver,flags,method,mt,md,crc,csize,usize,fnlen,xlen=struct.unpack_from('<5H3I2H',b,p+4)
-              name=b[p+30:p+30+fnlen].decode('utf-8','replace')
-              data_start=p+30+fnlen+xlen
-              end=data_start+csize
-              if end>len(b):
-                  print('PARTIAL_ENTRY',p,name,'needs_end',end,'prefix_end',len(b)); break
-              print(f'{p:8d}..{end:8d} {method} {csize:6d} {usize:6d} {name}')
-              p=end; count+=1
-          print('RECOVERABLE_COUNT',count,'NEXT_OFFSET',p,'PREFIX_END',len(b))
-          '@ | Set-Content scan_secondary.py -Encoding UTF8
-          python scan_secondary.py
+          # Repair chunk004: one extra Base64-valid char. Score candidates by verified ZIP continuity.
+          base03=''.join(chunks[i] for i in range(4))
+          c4=chunks[4]
+          best=[]; best_score=(-1,-1)
+          for pos in range(len(c4)):
+              repaired=c4[:pos]+c4[pos+1:]
+              try: b=base64.b64decode(base03+repaired+chunks[5]+chunks[6], validate=True)
+              except Exception: continue
+              p,c,n=scan_bytes(b,True)
+              score=(p,c)
+              if score>best_score: best_score=score; best=[(pos,repaired,n)]
+              elif score==best_score: best.append((pos,repaired,n))
+          print('CHUNK004_BEST',best_score,'CANDIDATES',len(best),'POSITIONS',[x[0] for x in best[:20]])
+          if not best: raise SystemExit('No chunk004 repair')
+          pos4,c4r,_=best[0]
+
+          # Repair chunk007: assume the four inserted chars are one contiguous display artifact.
+          prefix7=base03+c4r+chunks[5]+chunks[6]
+          c7=chunks[7]
+          best7=[]; best7score=(-1,-1)
+          for pos in range(len(c7)-3):
+              repaired=c7[:pos]+c7[pos+4:]
+              try: b=base64.b64decode(prefix7+repaired+chunks[8], validate=True)
+              except Exception: continue
+              p,c,n=scan_bytes(b,True)
+              score=(p,c)
+              if score>best7score: best7score=score; best7=[(pos,repaired,n,b)]
+              elif score==best7score: best7.append((pos,repaired,n,b))
+          print('CHUNK007_BEST',best7score,'CANDIDATES',len(best7),'POSITIONS',[x[0] for x in best7[:20]])
+          if not best7: raise SystemExit('No chunk007 repair')
+          pos7,c7r,names,b=best7[0]
+          print('REPAIR_POSITIONS chunk004',pos4,'chunk007',pos7)
+          print('RECOVERABLE_AFTER_CHUNK008',len(names),'END',names[-1][1] if names else 0,'BYTES',len(b))
+          print('--- RECOVERABLE SOURCE ENTRIES ---')
+          for p,end,name,cs,us in names:
+              if '/src/' in name or name.endswith('.sln'):
+                  print(f'{p:8d}..{end:8d} {name}')
+          print('--- LAST 35 ENTRIES ---')
+          for x in names[-35:]: print(x[2])
+          '@ | Set-Content recover_secondary.py -Encoding UTF8
+          python recover_secondary.py
