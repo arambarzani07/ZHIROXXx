@@ -20,7 +20,22 @@ jobs:
         run: |
           $files = Get-ChildItem 'temp-min-v11\*.b64' | Sort-Object Name
           if ($files.Count -ne 10) { throw "Expected 10 payload files, found $($files.Count)" }
-          $b64 = ($files | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          $parts = @()
+          for ($i=0; $i -lt $files.Count; $i++) {
+            $raw = (Get-Content $files[$i].FullName -Raw).Trim()
+            Write-Host "$($files[$i].Name): length=$($raw.Length), mod4=$($raw.Length % 4)"
+            $m = [regex]::Match($raw, '[^A-Za-z0-9+/=]')
+            if ($m.Success) {
+              $code = [int][char]$m.Value
+              throw "Invalid base64 character in $($files[$i].Name) at index $($m.Index): '$($m.Value)' code=$code"
+            }
+            if ($i -lt ($files.Count - 1) -and $raw.Contains('=')) {
+              throw "Unexpected padding '=' before final payload file: $($files[$i].Name)"
+            }
+            $parts += $raw
+          }
+          $b64 = $parts -join ''
+          Write-Host "Combined base64 length=$($b64.Length), mod4=$($b64.Length % 4)"
           [IO.File]::WriteAllBytes('V11_MINBUILD.zip', [Convert]::FromBase64String($b64))
           $hash = (Get-FileHash 'V11_MINBUILD.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "Payload SHA256=$hash"
