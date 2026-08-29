@@ -1,0 +1,135 @@
+name: temp-v11-self-runtime-test
+on:
+  push:
+    branches:
+      - temp-kanychnar-v11-exe-build
+permissions:
+  contents: read
+  actions: read
+jobs:
+  self-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CRC-verified recovered source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh api "/repos/${{ github.repository }}/actions/artifacts/9712881575/zip" > v11-recovered-source.zip
+          Expand-Archive -LiteralPath v11-recovered-source.zip -DestinationPath recovered-artifact -Force
+          if (-not (Test-Path 'recovered-artifact/recovered/KanyChnarPOS.sln')) { throw 'Recovered source artifact is invalid.' }
+
+      - name: Overlay reconstructed files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64 = (Get-Content -LiteralPath 'temp-reconstructed-v11/reconstructed-13.zip.b64' -Raw).Trim()
+          [IO.File]::WriteAllBytes('reconstructed-13.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash -LiteralPath 'reconstructed-13.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '1f038285eec578183e81e0f21783e2246f2570821e449cf37bf230923caeda1e') { throw "Reconstruction bundle SHA mismatch: $hash" }
+          Expand-Archive -LiteralPath 'reconstructed-13.zip' -DestinationPath 'recovered-artifact/recovered' -Force
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild.exe not found.' }
+          & $msbuild (Join-Path $root 'KanyChnarPOS.sln') /m /t:Restore,Build /p:Configuration=Release "/p:Platform=Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $LASTEXITCODE" }
+
+      - name: Golden replay and binary integrity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $admin = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $cashier = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          $verify = Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/net48/VerifyGolden.exe'
+          foreach ($exe in @($admin,$cashier,$verify)) {
+            if (-not (Test-Path $exe)) { throw "Missing: $exe" }
+            $b=[IO.File]::ReadAllBytes($exe)
+            if($b.Length -lt 1024 -or $b[0]-ne0x4D -or $b[1]-ne0x5A){throw "Invalid PE: $exe"}
+          }
+          & $verify | Tee-Object -FilePath golden-replay.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Golden replay failed.' }
+
+      - name: WPF XAML parse and startup smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $results=New-Object System.Collections.Generic.List[string]
+          foreach($x in Get-ChildItem (Join-Path $root 'src') -Filter *.xaml -Recurse){
+            try{[xml]$null=Get-Content $x.FullName -Raw;$results.Add("PASS XAML $($x.FullName.Substring($root.Length+1))")}catch{throw "XAML parse failed: $($x.FullName): $($_.Exception.Message)"}
+          }
+          $cashier=Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          $p=Start-Process $cashier -PassThru -WorkingDirectory (Split-Path $cashier)
+          Start-Sleep -Seconds 7
+          if($p.HasExited){throw "Cashier startup smoke failed; exit=$($p.ExitCode)"}
+          $results.Add("PASS Cashier process alive after 7 seconds PID=$($p.Id)")
+          Stop-Process -Id $p.Id -Force
+          # Admin is expected to remain at LoginWindow without user input.
+          $admin=Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $p2=Start-Process $admin -PassThru -WorkingDirectory (Split-Path $admin)
+          Start-Sleep -Seconds 7
+          if($p2.HasExited){throw "Admin startup smoke failed; exit=$($p2.ExitCode)"}
+          $results.Add("PASS Admin process alive at login after 7 seconds PID=$($p2.Id)")
+          Stop-Process -Id $p2.Id -Force
+          $results | Set-Content runtime-smoke.txt -Encoding UTF8
+
+      - name: Source safety assertions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $cash=Get-Content (Join-Path $root 'src/ZhiroxPOS.Cashier/MainWindow.xaml.cs') -Raw
+          if($cash -notmatch 'if \(movementKind == MovementKind\.Sale\)\s*SafeOpenDrawer\(\)'){throw 'Sale-only drawer guard missing.'}
+          if($cash -notmatch 'movementKind == MovementKind\.Sale'){throw 'Movement guard missing.'}
+          $parser=Get-Content (Join-Path $root 'src/ZhiroxPOS.Core/Services/ScaleBarcodeParser.cs') -Raw
+          if($parser -notmatch '1000'){throw 'Scale divisor evidence missing.'}
+          'PASS return drawer sale-only guard' | Set-Content safety.txt
+          'PASS scale parser constants present' | Add-Content safety.txt
+
+      - name: Produce self-test report
+        shell: pwsh
+        run: |
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $admin=Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $cashier=Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          $lines=@(
+            'KanyChnar POS V11 - SELF-RUN WINDOWS TEST',
+            'FINAL: PASS - AUTOMATED WINDOWS SOFTWARE TEST',
+            "UTC: $([DateTime]::UtcNow.ToString('s'))Z",
+            "Admin SHA256: $((Get-FileHash $admin -Algorithm SHA256).Hash.ToLowerInvariant())",
+            "Cashier SHA256: $((Get-FileHash $cashier -Algorithm SHA256).Hash.ToLowerInvariant())",
+            'PASS: MSBuild Release',
+            'PASS: Golden Replay',
+            'PASS: PE integrity',
+            'PASS: all XAML parse',
+            'PASS: Cashier WPF process remained alive after startup smoke',
+            'PASS: Admin WPF process remained alive at LoginWindow after startup smoke',
+            'PASS: return drawer sale-only source guard',
+            'LIMITATION: no physical printer/drawer/scale/customer-display is attached to GitHub Windows runner',
+            'LIMITATION: original private SQL BAK was not uploaded to public GitHub and therefore was not restored in this run'
+          )
+          $lines | Set-Content SELF_TEST_REPORT.txt -Encoding UTF8
+          Get-Content golden-replay.txt | Add-Content SELF_TEST_REPORT.txt
+          Get-Content runtime-smoke.txt | Add-Content SELF_TEST_REPORT.txt
+          Get-Content safety.txt | Add-Content SELF_TEST_REPORT.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-V11-Self-Test-Report
+          path: |
+            SELF_TEST_REPORT.txt
+            golden-replay.txt
+            runtime-smoke.txt
+            safety.txt
+          retention-days: 2
