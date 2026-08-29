@@ -8,88 +8,46 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build placeholder ZIP and map missing ranges
+      - name: Scan secondary payload
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           @'
-          import base64, pathlib, struct
+          import base64, pathlib, re, struct, zlib
 
-          def clean(path):
-              return ''.join(pathlib.Path(path).read_text().split())
+          root=pathlib.Path('temp-build-v11p')
+          names=['chunk000.b64','chunk001.b64','chunk002.b64','chunk003.b64','chunk004.b64','chunk005.b64','chunk006.b64','chunk007.b64','chunk008.b64','chunk009.b64']
+          parts=[]
+          for n in names:
+              s=''.join((root/n).read_text().split())
+              bad=[(i,c,ord(c)) for i,c in enumerate(s) if c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=']
+              print(n,'LEN',len(s),'MOD4',len(s)%4,'BAD',bad[:20])
+              # Strip only non-base64 display markers. For chunks with extra base64-valid chars,
+              # preserve the longest prefix that maintains the expected 16000-char boundary.
+              s=''.join(c for c in s if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+              if n in ('chunk004.b64','chunk007.b64') and len(s)>16000:
+                  # test simple removal candidates near boundary/middle later; print context first
+                  print(n,'EXTRA',len(s)-16000,'HEAD',s[:40],'TAIL',s[-40:])
+              parts.append(s)
 
-          a0=clean('temp-min-v11/chunk000.b64')
-          a1=clean('temp-min-v11/chunk001.b64')
-          a23=clean('temp-min-v11/chunk002-003.b64')
-          a45=clean('temp-min-v11/chunk004-005.b64')
-          a67=clean('temp-min-v11/chunk006-007.b64')
-          a8=clean('temp-min-v11/chunk008.b64')
-          a10=clean('temp-min-v11/chunk010.b64')
-          a11=clean('temp-min-v11/chunk011.b64')
-          a12=clean('temp-min-v11/chunk012.b64')
+          # Build a conservative prefix only through fully clean chunks 000-003.
+          prefix=''.join(parts[:4])
+          assert len(prefix)==64000, len(prefix)
+          b=base64.b64decode(prefix)
+          print('PREFIX_BYTES',len(b))
 
-          # remove the known 21-char display truncation markers
-          a45=a45[:10000]+a45[10021:]
-          a67=a67[:10000]+a67[10021:]
-          assert len(a23)==10000
-          assert len(a45)==20000
-          assert len(a67)==20000
-
-          # Recreate the exact expected Base64 positions. Unknown ranges are A placeholders.
-          # chunk002-003 was captured as first 5000 + last 5000 chars.
-          s=(a0+a1+
-             a23[:5000]+'A'*22000+a23[5000:]+
-             a45[:10000]+'A'*12000+a45[10000:]+
-             a67[:10000]+'A'*12000+a67[10000:]+
-             a8+
-             'A'*16000+
-             a10+a11+a12)
-          print('EXPECTED_B64_LEN',len(s))
-          assert len(s)==206056, len(s)
-          b=base64.b64decode(s)
-          print('PLACEHOLDER_ZIP_BYTES',len(b))
-
-          # Missing/unknown ranges in decoded ZIP byte coordinates.
-          holes=[
-              (37000//4*3,59000//4*3,'missing chunk002-003 middle'),
-              (74000//4*3,86000//4*3,'missing chunk004-005 middle'),
-              (106000//4*3,118000//4*3,'missing chunk006-007 middle'),
-              (144000//4*3,160000//4*3,'chunk009 unknown'),
-          ]
-          print('HOLES',holes)
-
-          eocd=b.rfind(b'PK\x05\x06')
-          if eocd<0: raise SystemExit('EOCD not found')
-          disk,cd_disk,n_disk,n_total,cd_size,cd_off,comment_len=struct.unpack_from('<HHHHIIH',b,eocd+4)
-          print('EOCD',eocd,'entries',n_total,'cd_off',cd_off,'cd_size',cd_size)
-          entries=[]
-          p=cd_off
-          for i in range(n_total):
-              if b[p:p+4]!=b'PK\x01\x02':
-                  raise SystemExit(f'central signature missing at {p} entry {i}: {b[p:p+8]!r}')
-              fields=struct.unpack_from('<6H3I5H2I',b,p+4)
-              # fields: made,need,flags,method,time,date,crc,csize,usize,fnlen,xlen,clen,disk,intattr,extattr,loff
-              csize=fields[7]; usize=fields[8]; fnlen=fields[9]; xlen=fields[10]; clen=fields[11]; loff=fields[15]
-              name_bytes=b[p+46:p+46+fnlen]
-              try: name=name_bytes.decode('utf-8')
-              except: name=name_bytes.decode('cp437','replace')
-              entries.append((loff,name,csize,usize))
-              p += 46+fnlen+xlen+clen
-          entries.sort()
-          print('CENTRAL_END',p)
-          print('\nIMPACTED ZIP ENTRIES:')
-          impacted=[]
-          for idx,(loff,name,csize,usize) in enumerate(entries):
-              end=entries[idx+1][0] if idx+1<len(entries) else cd_off
-              hit=[]
-              for hs,he,label in holes:
-                  if loff < he and end > hs:
-                      hit.append(label)
-              if hit:
-                  impacted.append(name)
-                  print(f'{loff:8d}..{end:8d}  {name}  :: {", ".join(hit)}')
-          print('IMPACTED_COUNT',len(impacted))
-          print('---ALL IMPACTED NAMES---')
-          for x in impacted: print(x)
-          '@ | Set-Content map_zip.py -Encoding UTF8
-          python map_zip.py
+          # Sequentially parse local ZIP records available in intact prefix.
+          p=0; count=0
+          print('RECOVERABLE_ENTRIES_FROM_CLEAN_PREFIX:')
+          while p+30 <= len(b) and b[p:p+4]==b'PK\x03\x04':
+              ver,flags,method,mt,md,crc,csize,usize,fnlen,xlen=struct.unpack_from('<5H3I2H',b,p+4)
+              name=b[p+30:p+30+fnlen].decode('utf-8','replace')
+              data_start=p+30+fnlen+xlen
+              end=data_start+csize
+              if end>len(b):
+                  print('PARTIAL_ENTRY',p,name,'needs_end',end,'prefix_end',len(b)); break
+              print(f'{p:8d}..{end:8d} {method} {csize:6d} {usize:6d} {name}')
+              p=end; count+=1
+          print('RECOVERABLE_COUNT',count,'NEXT_OFFSET',p,'PREFIX_END',len(b))
+          '@ | Set-Content scan_secondary.py -Encoding UTF8
+          python scan_secondary.py
