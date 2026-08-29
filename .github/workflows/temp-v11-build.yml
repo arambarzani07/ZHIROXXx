@@ -8,6 +8,68 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Runner test
+      - name: Reconstruct source ZIP
         shell: pwsh
-        run: Write-Host 'V11 Windows runner ready'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @('temp-min-v11/chunk000.b64','temp-min-v11/chunk001.b64','temp-min-v11/chunk002-003.b64','temp-min-v11/chunk004-005.b64','temp-min-v11/chunk006-007.b64','temp-min-v11/chunk008.b64','temp-min-v11/chunk009.b64','temp-min-v11/chunk010.b64','temp-min-v11/chunk011.b64','temp-min-v11/chunk012.b64')
+          $text = ''
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) { throw ('Missing file ' + $file) }
+            $text += Get-Content -Raw -LiteralPath $file
+          }
+          $text = $text -replace '\s',''
+          $bytes = [Convert]::FromBase64String($text)
+          [IO.File]::WriteAllBytes('v11-min.zip',$bytes)
+          Get-FileHash v11-min.zip -Algorithm SHA256
+          Expand-Archive -LiteralPath v11-min.zip -DestinationPath v11src -Force
+          $sln = Get-ChildItem v11src -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw 'Solution not found after extraction' }
+          Write-Host $sln.FullName
+      - name: Patch return drawer behavior
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Get-ChildItem v11src -Recurse -Filter MainWindow.xaml.cs | Where-Object { $_.FullName -like '*ZhiroxPOS.Cashier*' } | Select-Object -First 1
+          if (-not $file) { throw 'Cashier MainWindow source not found' }
+          $s = (Get-Content -Raw -LiteralPath $file.FullName).Replace("`r`n","`n")
+          if ($s -notmatch 'movementKind == MovementKind\.Sale') {
+            $old = "                    SafeOpenDrawer();`n                }`n                else if (mode == CheckoutMode.NoReceipt)`n                {`n                    SafeOpenDrawer();"
+            $new = "                    if (movementKind == MovementKind.Sale)`n                        SafeOpenDrawer();`n                }`n                else if (mode == CheckoutMode.NoReceipt)`n                {`n                    if (movementKind == MovementKind.Sale)`n                        SafeOpenDrawer();"
+            if (-not $s.Contains($old)) { throw 'Return drawer patch anchor not found' }
+            $s = $s.Replace($old,$new)
+            Set-Content -LiteralPath $file.FullName -Value $s -Encoding UTF8
+          }
+          if ((Get-Content -Raw -LiteralPath $file.FullName) -notmatch 'movementKind == MovementKind\.Sale') { throw 'Return drawer guard missing after patch' }
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sln = Get-ChildItem v11src -Recurse -Filter *.sln | Select-Object -First 1
+          msbuild $sln.FullName /m /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw ('MSBuild exit ' + $LASTEXITCODE) }
+      - name: Collect EXEs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force exe-output | Out-Null
+          $admin = Get-ChildItem v11src -Recurse -Filter Admin.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          $cashier = Get-ChildItem v11src -Recurse -Filter Cashier.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          if (-not $admin) { throw 'Admin.exe not found' }
+          if (-not $cashier) { throw 'Cashier.exe not found' }
+          foreach ($x in @($admin,$cashier)) {
+            $b = [IO.File]::ReadAllBytes($x.FullName)
+            if ($b.Length -lt 1024) { throw ('EXE too small ' + $x.Name) }
+            if ($b[0] -ne 77 -or $b[1] -ne 90) { throw ('Invalid PE ' + $x.Name) }
+            Copy-Item -LiteralPath $x.FullName -Destination (Join-Path exe-output $x.Name) -Force
+            Get-FileHash -LiteralPath $x.FullName -Algorithm SHA256
+          }
+      - name: Upload EXEs
+        uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-V11-EXE-only
+          path: exe-output/*.exe
+          if-no-files-found: error
+          retention-days: 7
