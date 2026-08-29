@@ -51,12 +51,15 @@ jobs:
           a8=cleanfile(mroot/'chunk008.b64'); a10=cleanfile(mroot/'chunk010.b64')
           a11=cleanfile(mroot/'chunk011.b64'); a12=cleanfile(mroot/'chunk012.b64')
           print('MIN_LENS',len(a0),len(a1),len(a23),len(a45),len(a67),len(a8),len(a10),len(a11),len(a12))
-          # Original display join marker was 21 chars; non-base64 filtering already removes one.
-          if len(a45)==20020: a45=a45[:10000]+a45[10020:]
-          if len(a67)==20020: a67=a67[:10000]+a67[10020:]
+          def repair_join(s):
+              extra=len(s)-20000
+              if extra<0: raise AssertionError(('join too short',len(s)))
+              if extra: s=s[:10000]+s[10000+extra:]
+              assert len(s)==20000,len(s)
+              return s
+          a45=repair_join(a45); a67=repair_join(a67)
           assert len(a0)==16000 and len(a1)==16000 and len(a23)==10000
-          assert len(a45)==20000 and len(a67)==20000 and len(a8)==16000
-          assert len(a10)==16000 and len(a11)==16000 and len(a12)==14056
+          assert len(a8)==16000 and len(a10)==16000 and len(a11)==16000 and len(a12)==14056
           mb64=(a0+a1+a23[:5000]+'A'*22000+a23[5000:]+a45[:10000]+'A'*12000+a45[10000:]+a67[:10000]+'A'*12000+a67[10000:]+a8+'A'*16000+a10+a11+a12)
           assert len(mb64)==206056,len(mb64)
           mb=base64.b64decode(mb64)
