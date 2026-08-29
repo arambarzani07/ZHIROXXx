@@ -1,0 +1,101 @@
+name: temp-v11-final-exe
+on:
+  push:
+    branches:
+      - temp-kanychnar-v11-exe-build
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CRC-verified recovered source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh api "/repos/${{ github.repository }}/actions/artifacts/9712881575/zip" > v11-recovered-source.zip
+          Expand-Archive -LiteralPath v11-recovered-source.zip -DestinationPath recovered-artifact -Force
+          if (-not (Test-Path 'recovered-artifact/recovered/KanyChnarPOS.sln')) { throw 'Recovered source artifact is invalid.' }
+          Write-Host 'Recovered source artifact: PASS'
+
+      - name: Overlay reconstructed 13 files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64 = (Get-Content -LiteralPath 'temp-reconstructed-v11/reconstructed-13.zip.b64' -Raw).Trim()
+          [IO.File]::WriteAllBytes('reconstructed-13.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash -LiteralPath 'reconstructed-13.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '1f038285eec578183e81e0f21783e2246f2570821e449cf37bf230923caeda1e') { throw "Reconstruction bundle SHA mismatch: $hash" }
+          Expand-Archive -LiteralPath 'reconstructed-13.zip' -DestinationPath 'recovered-artifact/recovered' -Force
+
+          $missing = Get-Content -LiteralPath 'recovered-artifact/missing.txt' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          foreach ($rel in $missing) {
+            $p = Join-Path 'recovered-artifact/recovered' $rel
+            if (-not (Test-Path -LiteralPath $p)) { throw "Still missing: $rel" }
+          }
+          Write-Host "Overlay complete. Reconstructed files: $($missing.Count)"
+
+      - name: Validate source and drawer safety patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'recovered-artifact/recovered'
+          $buildFiles = Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -File | Where-Object { $_.Extension -in '.cs','.xaml','.csproj','.config' }
+          Write-Host "Source/build files present: $($buildFiles.Count)"
+          $cashier = Get-Content -LiteralPath (Join-Path $root 'src/ZhiroxPOS.Cashier/MainWindow.xaml.cs') -Raw
+          $saleGuards = ([regex]::Matches($cashier, 'movementKind\s*==\s*MovementKind\.Sale')).Count
+          if ($saleGuards -lt 2) { throw 'Return-drawer safety guard is missing.' }
+          Write-Host 'Return-drawer safety guard: PASS'
+
+      - name: Build Release with MSBuild
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw 'vswhere.exe not found.' }
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild.exe not found.' }
+          Write-Host "MSBuild: $msbuild"
+          & $msbuild (Join-Path $root 'KanyChnarPOS.sln') /m /t:Restore,Build /p:Configuration=Release "/p:Platform=Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $LASTEXITCODE" }
+
+      - name: Run Golden Replay and validate EXEs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Resolve-Path 'recovered-artifact/recovered').Path
+          $admin = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/Admin.exe'
+          $cashier = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/Cashier.exe'
+          $verify = Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/VerifyGolden.exe'
+
+          foreach ($exe in @($admin,$cashier,$verify)) {
+            if (-not (Test-Path -LiteralPath $exe)) { throw "Compiled EXE missing: $exe" }
+            $bytes = [IO.File]::ReadAllBytes($exe)
+            if ($bytes.Length -lt 1024 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "Invalid PE executable: $exe" }
+            Write-Host "PE PASS: $exe ($($bytes.Length) bytes)"
+          }
+
+          & $verify
+          if ($LASTEXITCODE -ne 0) { throw "Golden Replay failed: $LASTEXITCODE" }
+          Write-Host 'Golden Replay: PASS'
+
+          New-Item -ItemType Directory -Force -Path exe-only | Out-Null
+          Copy-Item -LiteralPath $admin -Destination 'exe-only/Admin.exe' -Force
+          Copy-Item -LiteralPath $cashier -Destination 'exe-only/Cashier.exe' -Force
+          Get-FileHash 'exe-only/Admin.exe','exe-only/Cashier.exe' -Algorithm SHA256 | Format-Table -AutoSize
+
+      - name: Upload EXE only
+        uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-V11-EXE-ONLY
+          path: |
+            exe-only/Admin.exe
+            exe-only/Cashier.exe
+          if-no-files-found: error
+          retention-days: 2
