@@ -70,9 +70,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = (Resolve-Path 'recovered-artifact/recovered').Path
-          $admin = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/Admin.exe'
-          $cashier = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/Cashier.exe'
-          $verify = Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/VerifyGolden.exe'
+          $admin = Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $cashier = Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          $verify = Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/net48/VerifyGolden.exe'
 
           foreach ($exe in @($admin,$cashier,$verify)) {
             if (-not (Test-Path -LiteralPath $exe)) { throw "Compiled EXE missing: $exe" }
