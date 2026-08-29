@@ -13,143 +13,109 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           @'
-          import base64, pathlib, struct, zlib, binascii, shutil, os
-
+          import base64, pathlib, struct, zlib, binascii, shutil
           OUT=pathlib.Path('recovered')
           if OUT.exists(): shutil.rmtree(OUT)
           OUT.mkdir()
           alphabet=set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
-
           def cleanfile(path):
               s=''.join(pathlib.Path(path).read_text().split())
               return ''.join(c for c in s if c in alphabet)
-
-          def inflate_record(b, loff):
-              if b[loff:loff+4] != b'PK\x03\x04': return None
+          def inflate_record(b,loff):
+              if b[loff:loff+4]!=b'PK\x03\x04': return None
               ver,flags,method,mt,md,crc,cs,us,fn,xl=struct.unpack_from('<5H3I2H',b,loff+4)
               name=b[loff+30:loff+30+fn].decode('utf-8','replace')
               ds=loff+30+fn+xl; end=ds+cs
               if end>len(b): return None
               comp=b[ds:end]
-              try:
-                  raw=comp if method==0 else zlib.decompress(comp,-15) if method==8 else None
+              try: raw=comp if method==0 else zlib.decompress(comp,-15) if method==8 else None
               except: return None
               if raw is None or len(raw)!=us or (binascii.crc32(raw)&0xffffffff)!=crc: return None
               return name,raw,end
-
           def normalize(name):
               prefix='KanyChnar_POS_Rebuild_V11_OneClick_EXE_Builder/'
               if name.startswith(prefix): name=name[len(prefix):]
-              return name
-
+              return name.replace('\\','/')
           recovered_by={}
-          def save(name, raw, source):
-              name=normalize(name).replace('\\','/')
+          def save(name,raw,source):
+              name=normalize(name)
               if not (name.startswith('src/') or name.endswith('.sln')): return
-              p=OUT/name
-              p.parent.mkdir(parents=True,exist_ok=True)
-              # Prefer later verified overlay only when path absent; CRC-valid versions should match.
-              if p.exists() and p.read_bytes()!=raw:
-                  print('VERSION_DIFFERENCE',name,'existing',recovered_by.get(name),'new',source)
-              p.write_bytes(raw)
-              recovered_by[name]=source
+              p=OUT/name; p.parent.mkdir(parents=True,exist_ok=True)
+              if p.exists() and p.read_bytes()!=raw: print('VERSION_DIFFERENCE',name,recovered_by.get(name),source)
+              p.write_bytes(raw); recovered_by[name]=source
 
-          # -------- Minimal ZIP: central directory is intact; recover every record outside known holes.
           mroot=pathlib.Path('temp-min-v11')
           a0=cleanfile(mroot/'chunk000.b64'); a1=cleanfile(mroot/'chunk001.b64')
           a23=cleanfile(mroot/'chunk002-003.b64')
           a45=cleanfile(mroot/'chunk004-005.b64'); a67=cleanfile(mroot/'chunk006-007.b64')
           a8=cleanfile(mroot/'chunk008.b64'); a10=cleanfile(mroot/'chunk010.b64')
           a11=cleanfile(mroot/'chunk011.b64'); a12=cleanfile(mroot/'chunk012.b64')
-          # Remove known display marker inserted at the join of first/last snippets.
-          if len(a45)==20021: a45=a45[:10000]+a45[10021:]
-          if len(a67)==20021: a67=a67[:10000]+a67[10021:]
+          print('MIN_LENS',len(a0),len(a1),len(a23),len(a45),len(a67),len(a8),len(a10),len(a11),len(a12))
+          # Original display join marker was 21 chars; non-base64 filtering already removes one.
+          if len(a45)==20020: a45=a45[:10000]+a45[10020:]
+          if len(a67)==20020: a67=a67[:10000]+a67[10020:]
           assert len(a0)==16000 and len(a1)==16000 and len(a23)==10000
           assert len(a45)==20000 and len(a67)==20000 and len(a8)==16000
           assert len(a10)==16000 and len(a11)==16000 and len(a12)==14056
-          mb64=(a0+a1 + a23[:5000]+'A'*22000+a23[5000:] +
-                a45[:10000]+'A'*12000+a45[10000:] +
-                a67[:10000]+'A'*12000+a67[10000:] +
-                a8 + 'A'*16000 + a10+a11+a12)
-          assert len(mb64)==206056, len(mb64)
+          mb64=(a0+a1+a23[:5000]+'A'*22000+a23[5000:]+a45[:10000]+'A'*12000+a45[10000:]+a67[:10000]+'A'*12000+a67[10000:]+a8+'A'*16000+a10+a11+a12)
+          assert len(mb64)==206056,len(mb64)
           mb=base64.b64decode(mb64)
           eocd=mb.rfind(b'PK\x05\x06'); assert eocd>=0
           disk,cd_disk,n_disk,n_total,cd_size,cd_off,comment_len=struct.unpack_from('<HHHHIIH',mb,eocd+4)
           central=[]; p=cd_off
           for i in range(n_total):
-              assert mb[p:p+4]==b'PK\x01\x02'
+              assert mb[p:p+4]==b'PK\x01\x02',(i,p,mb[p:p+8])
               f=struct.unpack_from('<6H3I5H2I',mb,p+4)
               cs,us,fn,xl,cl,loff=f[7],f[8],f[9],f[10],f[11],f[15]
               name=mb[p+46:p+46+fn].decode('utf-8','replace')
-              central.append((loff,name,cs,us))
-              p += 46+fn+xl+cl
+              central.append((loff,name,cs,us)); p+=46+fn+xl+cl
           central.sort()
           holes=[(27750,44250),(55500,64500),(79500,88500),(108000,120000)]
           for i,(loff,name,cs,us) in enumerate(central):
-              record_end=central[i+1][0] if i+1<len(central) else cd_off
-              if any(loff < he and record_end > hs for hs,he in holes): continue
+              rend=central[i+1][0] if i+1<len(central) else cd_off
+              if any(loff<he and rend>hs for hs,he in holes): continue
               rec=inflate_record(mb,loff)
-              if rec:
-                  rname,raw,end=rec
-                  save(rname,raw,'minimal-intact')
+              if rec: save(rec[0],rec[1],'minimal-intact')
 
-          # -------- Secondary ZIP helpers.
           sroot=pathlib.Path('temp-build-v11p')
           def sr(i):
-              p=sroot/f'chunk{i:03d}.b64'
-              return cleanfile(p) if p.exists() else None
-
-          def scan_seq(b, source):
-              p=0
+              p=sroot/f'chunk{i:03d}.b64'; return cleanfile(p) if p.exists() else None
+          def scan_seq(b,source):
+              p=0; count=0
               while p+30<=len(b) and b[p:p+4]==b'PK\x03\x04':
                   rec=inflate_record(b,p)
                   if not rec: break
-                  name,raw,end=rec
-                  save(name,raw,source)
-                  p=end
-              print(source,'SEQUENTIAL_END',p)
-
-          def scan_block(text, source):
-              if not text: return
+                  save(rec[0],rec[1],source); p=rec[2]; count+=1
+              print(source,'SEQ',count,'END',p)
+          def scan_block(text,source):
+              if not text:return
               text=text[:len(text)//4*4]
-              try: b=base64.b64decode(text,validate=True)
-              except Exception as e:
-                  print(source,'DECODE_FAIL',e); return
-              start=0; count=0
+              try:b=base64.b64decode(text,validate=True)
+              except Exception as e: print(source,'DECODE_FAIL',e);return
+              st=0;count=0
               while True:
-                  q=b.find(b'PK\x03\x04',start)
-                  if q<0: break
-                  start=q+1
-                  rec=inflate_record(b,q)
-                  if rec:
-                      name,raw,end=rec; save(name,raw,source); count+=1
-              print(source,'BLOCK_RECOVERED',count)
-
-          # Verified prefix: chunk004 extra is final char. Chunk007 corruption begins only after
-          # the last CRC-verified record at byte 91709, so remove four chars at local pos 10278.
+                  q=b.find(b'PK\x03\x04',st)
+                  if q<0:break
+                  st=q+1; rec=inflate_record(b,q)
+                  if rec: save(rec[0],rec[1],source);count+=1
+              print(source,'BLOCK',count)
           c=[sr(i) for i in range(9)]
           c4=c[4][:-1] if len(c[4])==16001 else c[4]
           c7=c[7][:10278]+c[7][10282:] if len(c[7])==16004 else c[7]
           prefix=''.join(c[:4])+c4+c[5]+c[6]+c7+c[8]
           scan_seq(base64.b64decode(prefix,validate=True),'secondary-prefix')
-
-          # Independent exact Base64 boundaries can be decoded despite missing neighboring chunks.
           scan_block(sr(8),'secondary-chunk008')
           scan_block(sr(9),'secondary-chunk009-partial')
           scan_block(sr(10),'secondary-chunk010')
-          if sr(12) and sr(13): scan_block(sr(12)+sr(13),'secondary-chunks012-013')
+          if sr(12) and sr(13):scan_block(sr(12)+sr(13),'secondary-chunks012-013')
           scan_block(sr(16),'secondary-chunk016')
 
           expected=[normalize(n) for _,n,_,_ in central if normalize(n).startswith('src/') or normalize(n).endswith('.sln')]
           present={str(x.relative_to(OUT)).replace('\\','/') for x in OUT.rglob('*') if x.is_file()}
           missing=[x for x in expected if x not in present]
-          print('\nEXPECTED_BUILD_FILES',len(expected))
-          print('RECOVERED_BUILD_FILES',len(present))
-          print('MISSING_BUILD_FILES',len(missing))
+          print('EXPECTED_BUILD_FILES',len(expected));print('RECOVERED_BUILD_FILES',len(present));print('MISSING_BUILD_FILES',len(missing))
           print('---MISSING---')
-          for x in missing: print(x)
-          print('---RECOVERED SOURCES---')
-          for x in sorted(present): print(x,'<=',recovered_by.get(x))
+          for x in missing:print(x)
           pathlib.Path('missing.txt').write_text('\n'.join(missing),encoding='utf-8')
           '@ | Set-Content recover_overlay.py -Encoding UTF8
           python recover_overlay.py
