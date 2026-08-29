@@ -5,12 +5,64 @@ on:
     paths:
       - '.github/workflows/temp-v11-build.yml'
       - 'temp-v11-trigger.txt'
+
 jobs:
-  probe:
+  build:
     runs-on: windows-latest
     steps:
-      - name: Probe Windows runner
+      - name: Checkout temporary V11 payload branch
+        uses: actions/checkout@v4
+        with:
+          ref: temp-kanychnar-v11-exe-build
+
+      - name: Reconstruct and verify V11 source ZIP
         shell: pwsh
         run: |
-          Write-Host 'V11 Windows runner OK'
-          [Environment]::OSVersion.VersionString
+          $files = Get-ChildItem 'temp-min-v11\*.b64' | Sort-Object Name
+          if ($files.Count -ne 10) { throw "Expected 10 payload files, found $($files.Count)" }
+          $b64 = ($files | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          [IO.File]::WriteAllBytes('V11_MINBUILD.zip', [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash 'V11_MINBUILD.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Payload SHA256=$hash"
+          if ($hash -ne 'db1450b028f299faaf073043b72ce93921573f5acf325070b3ad6d535bdfb896') {
+            throw "Payload SHA256 mismatch"
+          }
+          New-Item -ItemType Directory -Force -Path buildsrc | Out-Null
+          Expand-Archive 'V11_MINBUILD.zip' -DestinationPath buildsrc -Force
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          Set-Location buildsrc
+          & msbuild.exe KanyChnarPOS.sln /m /restore /t:Build /p:Configuration=Release '/p:Platform=Any CPU' /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+
+      - name: Validate and collect EXEs
+        shell: pwsh
+        run: |
+          $admin = 'buildsrc\src\ZhiroxPOS.Admin\bin\Release\Admin.exe'
+          $cashier = 'buildsrc\src\ZhiroxPOS.Cashier\bin\Release\Cashier.exe'
+          foreach ($p in @($admin,$cashier)) {
+            if (!(Test-Path $p)) { throw "Missing compiled executable: $p" }
+            $bytes = [IO.File]::ReadAllBytes($p)
+            if ($bytes.Length -lt 1024 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "Invalid PE executable: $p"
+            }
+            Get-FileHash $p -Algorithm SHA256
+          }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $admin 'out\Admin.exe'
+          Copy-Item $cashier 'out\Cashier.exe'
+
+      - name: Upload compiled EXEs
+        uses: actions/upload-artifact@v4
+        with:
+          name: kanychnar-v11-exes
+          path: |
+            out/Admin.exe
+            out/Cashier.exe
+          if-no-files-found: error
+          retention-days: 1
