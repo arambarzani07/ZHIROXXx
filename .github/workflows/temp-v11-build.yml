@@ -8,60 +8,75 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve chunk007 and extend recoverable ZIP prefix
+      - name: Scan independent later ZIP blocks
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           @'
           import base64, pathlib, struct, zlib, binascii
           root=pathlib.Path('temp-build-v11p')
-          def rd(i):
-              s=''.join((root/f'chunk{i:03d}.b64').read_text().split())
-              return ''.join(c for c in s if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
-          c={i:rd(i) for i in range(10)}
-          # chunk004 repair is uniquely proven: extra character is the final char.
-          assert len(c[4])==16001
-          c4=c[4][:-1]
-          base=''.join(c[i] for i in range(4))+c4+c[5]+c[6]
+          alphabet=set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+          def rd(n):
+              p=root/f'chunk{n:03d}.b64'
+              if not p.exists(): return None
+              s=''.join(p.read_text().split())
+              s=''.join(c for c in s if c in alphabet)
+              return s
 
-          def scan(b):
-              p=0; out=[]
-              while p+30<=len(b) and b[p:p+4]==b'PK\x03\x04':
-                  ver,flags,method,mt,md,crc,cs,us,fn,xl=struct.unpack_from('<5H3I2H',b,p+4)
-                  if fn>1000 or xl>10000 or cs>10_000_000: break
-                  name=b[p+30:p+30+fn].decode('utf-8','replace')
+          for i in range(10,21):
+              s=rd(i)
+              print('CHUNK',i,'LEN',None if s is None else len(s),'MOD4',None if s is None else len(s)%4)
+
+          def scan_block(label, text, global_base):
+              # Decode only full quartets. This gives the exact bytes for this global Base64 interval.
+              text=text[:len(text)//4*4]
+              try: b=base64.b64decode(text,validate=True)
+              except Exception as e:
+                  print(label,'DECODE_FAIL',e); return []
+              print('\nBLOCK',label,'BYTES',len(b),'GLOBAL_BASE',global_base)
+              found=[]
+              start=0
+              while True:
+                  p=b.find(b'PK\x03\x04',start)
+                  if p<0: break
+                  start=p+1
+                  if p+30>len(b): continue
+                  try:
+                      ver,flags,method,mt,md,crc,cs,us,fn,xl=struct.unpack_from('<5H3I2H',b,p+4)
+                  except: continue
+                  if fn<1 or fn>1000 or xl>10000 or cs>10_000_000: continue
                   ds=p+30+fn+xl; end=ds+cs
-                  if end>len(b): break
+                  if end>len(b): continue
+                  name=b[p+30:p+30+fn].decode('utf-8','replace')
                   try:
                       comp=b[ds:end]
-                      raw=comp if method==0 else zlib.decompress(comp,-15) if method==8 else None
-                      if raw is None or len(raw)!=us or (binascii.crc32(raw)&0xffffffff)!=crc: break
-                  except: break
-                  out.append((p,end,name)); p=end
-              return p,out
+                      if method==0: raw=comp
+                      elif method==8: raw=zlib.decompress(comp,-15)
+                      else: continue
+                      if len(raw)!=us or (binascii.crc32(raw)&0xffffffff)!=crc: continue
+                  except: continue
+                  found.append((global_base+p,global_base+end,name,raw))
+              for a,e,n,raw in found:
+                  print(f'RECOVER {a:8d}..{e:8d} {len(raw):6d} {n}')
+              return found
 
-          c7=c[7]; c8=c[8]; c9=c[9]
-          assert len(c7)==16004 and len(c8)==16000
-          # chunk009 is a prefix capture; trim final incomplete Base64 quartet only.
-          c9p=c9[:len(c9)//4*4]
-          best=(-1,-1,None,None)
-          ties=[]
-          for pos in range(10278,len(c7)-3):
-              r7=c7[:pos]+c7[pos+4:]
-              text=base+r7+c8+c9p
-              try: b=base64.b64decode(text,validate=True)
-              except: continue
-              end,entries=scan(b)
-              score=(end,len(entries))
-              if score>best[:2]: best=(end,len(entries),pos,entries); ties=[pos]
-              elif score==best[:2]: ties.append(pos)
-          print('BEST_END',best[0],'COUNT',best[1],'POS',best[2],'TIES',len(ties),'FIRST_TIES',ties[:30])
-          entries=best[3]
-          print('--- RECOVERABLE SOURCE ENTRIES ---')
-          for a,b,n in entries:
+          recovered=[]
+          # clean single chunk 010 => base64 160000..176000 => binary 120000..132000
+          s10=rd(10)
+          if s10: recovered += scan_block('010',s10,120000)
+          # chunk011 is missing. chunks012+013 are clean contiguous => b64 192000..224000 => bytes 144000..168000
+          s12,s13=rd(12),rd(13)
+          if s12 and s13 and len(s12)==16000 and len(s13)==16000:
+              recovered += scan_block('012+013',s12+s13,144000)
+          # chunk014 may have +2; diagnose but don't trust yet. chunk016 is clean standalone => b64 256000..272000 => bytes 192000..204000
+          s16=rd(16)
+          if s16 and len(s16)==16000:
+              recovered += scan_block('016',s16,192000)
+
+          print('\nTOTAL_RECOVERABLE_LATER',len(recovered))
+          print('---SOURCE_ONLY---')
+          for a,e,n,raw in recovered:
               if '/src/' in n or n.endswith('.sln'):
-                  print(f'{a:8d}..{b:8d} {n}')
-          print('--- LAST 50 ENTRIES ---')
-          for x in entries[-50:]: print(x[2])
-          '@ | Set-Content extend_secondary.py -Encoding UTF8
-          python extend_secondary.py
+                  print(n)
+          '@ | Set-Content scan_later.py -Encoding UTF8
+          python scan_later.py
