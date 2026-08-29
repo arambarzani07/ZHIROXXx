@@ -8,19 +8,96 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Diagnose payload characters
+      - name: Repair and reconstruct source ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('temp-min-v11/chunk000.b64','temp-min-v11/chunk001.b64','temp-min-v11/chunk002-003.b64','temp-min-v11/chunk004-005.b64','temp-min-v11/chunk006-007.b64','temp-min-v11/chunk008.b64','temp-min-v11/chunk009.b64','temp-min-v11/chunk010.b64','temp-min-v11/chunk011.b64','temp-min-v11/chunk012.b64')
-          foreach ($file in $files) {
-            $s = Get-Content -Raw -LiteralPath $file
-            $cleanWs = $s -replace '\s',''
-            $invalid = [regex]::Matches($cleanWs,'[^A-Za-z0-9+/=]')
-            Write-Host ('FILE=' + $file + ' RAW=' + $s.Length + ' NOWS=' + $cleanWs.Length + ' MOD4=' + ($cleanWs.Length % 4) + ' INVALID=' + $invalid.Count)
-            foreach ($m in $invalid) {
-              Write-Host (' INVALID index=' + $m.Index + ' char=[' + $m.Value + '] code=' + [int][char]$m.Value)
+          function ReadClean($p) { return ((Get-Content -Raw -LiteralPath $p) -replace '\s','') }
+          $a0 = ReadClean 'temp-min-v11/chunk000.b64'
+          $a1 = ReadClean 'temp-min-v11/chunk001.b64'
+          $a23 = ReadClean 'temp-min-v11/chunk002-003.b64'
+          $a45 = ReadClean 'temp-min-v11/chunk004-005.b64'
+          $a67 = ReadClean 'temp-min-v11/chunk006-007.b64'
+          $a8 = ReadClean 'temp-min-v11/chunk008.b64'
+          $a9 = ReadClean 'temp-min-v11/chunk009.b64'
+          $a10 = ReadClean 'temp-min-v11/chunk010.b64'
+          $a11 = ReadClean 'temp-min-v11/chunk011.b64'
+          $a12 = ReadClean 'temp-min-v11/chunk012.b64'
+          if ($a45.Length -ne 20021) { throw ('Unexpected chunk004-005 length ' + $a45.Length) }
+          if ($a67.Length -ne 20021) { throw ('Unexpected chunk006-007 length ' + $a67.Length) }
+          $a45 = $a45.Remove(10000,21)
+          $a67 = $a67.Remove(10000,21)
+          if ($a9.Length -ne 16002) { throw ('Unexpected chunk009 length ' + $a9.Length) }
+          $prefix = $a0 + $a1 + $a23 + $a45 + $a67 + $a8
+          $suffix = $a10 + $a11 + $a12
+          $candidates = @(
+            @{ Name='remove-last-2'; Value=$a9.Substring(0,16000) },
+            @{ Name='remove-first-2'; Value=$a9.Substring(2) }
+          )
+          $success = $false
+          foreach ($candidate in $candidates) {
+            try {
+              $text = $prefix + $candidate.Value + $suffix
+              $bytes = [Convert]::FromBase64String($text)
+              [IO.File]::WriteAllBytes('candidate.zip',$bytes)
+              if (Test-Path v11src) { Remove-Item -Recurse -Force v11src }
+              Expand-Archive -LiteralPath candidate.zip -DestinationPath v11src -Force
+              $sln = Get-ChildItem v11src -Recurse -Filter *.sln | Select-Object -First 1
+              if (-not $sln) { throw 'No solution in candidate ZIP' }
+              Move-Item -Force candidate.zip v11-min.zip
+              Write-Host ('PAYLOAD_REPAIR=' + $candidate.Name)
+              Get-FileHash v11-min.zip -Algorithm SHA256
+              Write-Host ('SOLUTION=' + $sln.FullName)
+              $success = $true
+              break
+            } catch {
+              Write-Host ('Candidate failed: ' + $candidate.Name + ' :: ' + $_.Exception.Message)
             }
-            Write-Host (' HEAD=' + $cleanWs.Substring(0,[Math]::Min(60,$cleanWs.Length)))
-            Write-Host (' TAIL=' + $cleanWs.Substring([Math]::Max(0,$cleanWs.Length-60)))
           }
+          if (-not $success) { throw 'No simple chunk009 repair produced a valid ZIP' }
+      - name: Patch return drawer behavior
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Get-ChildItem v11src -Recurse -Filter MainWindow.xaml.cs | Where-Object { $_.FullName -like '*ZhiroxPOS.Cashier*' } | Select-Object -First 1
+          if (-not $file) { throw 'Cashier MainWindow source not found' }
+          $s = (Get-Content -Raw -LiteralPath $file.FullName).Replace("`r`n","`n")
+          if ($s -notmatch 'movementKind == MovementKind\.Sale') {
+            $old = "                    SafeOpenDrawer();`n                }`n                else if (mode == CheckoutMode.NoReceipt)`n                {`n                    SafeOpenDrawer();"
+            $new = "                    if (movementKind == MovementKind.Sale)`n                        SafeOpenDrawer();`n                }`n                else if (mode == CheckoutMode.NoReceipt)`n                {`n                    if (movementKind == MovementKind.Sale)`n                        SafeOpenDrawer();"
+            if (-not $s.Contains($old)) { throw 'Return drawer patch anchor not found' }
+            $s = $s.Replace($old,$new)
+            Set-Content -LiteralPath $file.FullName -Value $s -Encoding UTF8
+          }
+          if ((Get-Content -Raw -LiteralPath $file.FullName) -notmatch 'movementKind == MovementKind\.Sale') { throw 'Return drawer guard missing' }
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sln = Get-ChildItem v11src -Recurse -Filter *.sln | Select-Object -First 1
+          msbuild $sln.FullName /m /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw ('MSBuild exit ' + $LASTEXITCODE) }
+      - name: Collect EXEs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force exe-output | Out-Null
+          $admin = Get-ChildItem v11src -Recurse -Filter Admin.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          $cashier = Get-ChildItem v11src -Recurse -Filter Cashier.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          if (-not $admin) { throw 'Admin.exe not found' }
+          if (-not $cashier) { throw 'Cashier.exe not found' }
+          foreach ($x in @($admin,$cashier)) {
+            $b = [IO.File]::ReadAllBytes($x.FullName)
+            if ($b.Length -lt 1024 -or $b[0] -ne 77 -or $b[1] -ne 90) { throw ('Invalid PE ' + $x.Name) }
+            Copy-Item -LiteralPath $x.FullName -Destination (Join-Path exe-output $x.Name) -Force
+            Get-FileHash -LiteralPath $x.FullName -Algorithm SHA256
+          }
+      - name: Upload EXEs
+        uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-V11-EXE-only
+          path: exe-output/*.exe
+          if-no-files-found: error
+          retention-days: 7
