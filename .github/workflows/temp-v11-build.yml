@@ -1,0 +1,112 @@
+name: temp-v11-build
+
+on:
+  push:
+    branches: [temp-kanychnar-v11-exe-build]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-v11:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct minimal V11 source archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $order = @(
+            'temp-min-v11/chunk000.b64',
+            'temp-min-v11/chunk001.b64',
+            'temp-min-v11/chunk002-003.b64',
+            'temp-min-v11/chunk004-005.b64',
+            'temp-min-v11/chunk006-007.b64',
+            'temp-min-v11/chunk008.b64',
+            'temp-min-v11/chunk009.b64',
+            'temp-min-v11/chunk010.b64',
+            'temp-min-v11/chunk011.b64',
+            'temp-min-v11/chunk012.b64'
+          )
+          $b64 = ''
+          foreach ($f in $order) {
+            if (-not (Test-Path $f)) { throw "Missing payload file: $f" }
+            $b64 += (Get-Content -Raw -LiteralPath $f)
+          }
+          $b64 = $b64 -replace '\s',''
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes('v11-min.zip',$bytes)
+          Write-Host "ZIP bytes: $($bytes.Length)"
+          Get-FileHash v11-min.zip -Algorithm SHA256
+          Expand-Archive -LiteralPath v11-min.zip -DestinationPath v11src -Force
+          Get-ChildItem v11src -Recurse -Filter *.sln | Format-Table FullName
+
+      - name: Apply return drawer safety patch if needed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cashier = Get-ChildItem v11src -Recurse -Filter MainWindow.xaml.cs | Where-Object { $_.FullName -like '*ZhiroxPOS.Cashier*' } | Select-Object -First 1
+          if (-not $cashier) { throw 'Cashier MainWindow.xaml.cs not found' }
+          $s = Get-Content -Raw -LiteralPath $cashier.FullName
+          if ($s -notmatch 'movementKind == MovementKind\.Sale') {
+            $old = @"
+                    SafeOpenDrawer();
+                }
+                else if (mode == CheckoutMode.NoReceipt)
+                {
+                    SafeOpenDrawer();
+"@
+            $new = @"
+                    if (movementKind == MovementKind.Sale)
+                        SafeOpenDrawer();
+                }
+                else if (mode == CheckoutMode.NoReceipt)
+                {
+                    if (movementKind == MovementKind.Sale)
+                        SafeOpenDrawer();
+"@
+            if (-not $s.Contains($old)) { throw 'Expected drawer patch anchor not found' }
+            $s = $s.Replace($old,$new)
+            Set-Content -LiteralPath $cashier.FullName -Value $s -Encoding UTF8
+          }
+          Select-String -LiteralPath $cashier.FullName -Pattern 'movementKind == MovementKind.Sale' | Format-Table
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sln = Get-ChildItem v11src -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw 'Solution not found' }
+          Write-Host "Building $($sln.FullName)"
+          msbuild $sln.FullName /m /t:Restore,Build /p:Configuration=Release /p:Platform="Any CPU" /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed: $LASTEXITCODE" }
+
+      - name: Collect and validate EXEs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path exe-output | Out-Null
+          $admin = Get-ChildItem v11src -Recurse -Filter Admin.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          $cashier = Get-ChildItem v11src -Recurse -Filter Cashier.exe | Where-Object { $_.FullName -match 'bin\\Release' } | Select-Object -First 1
+          if (-not $admin) { throw 'Admin.exe not found' }
+          if (-not $cashier) { throw 'Cashier.exe not found' }
+          foreach ($x in @($admin,$cashier)) {
+            $b = [IO.File]::ReadAllBytes($x.FullName)
+            if ($b.Length -lt 1024 -or $b[0] -ne 0x4d -or $b[1] -ne 0x5a) { throw "Invalid PE: $($x.FullName)" }
+            Copy-Item -LiteralPath $x.FullName -Destination (Join-Path exe-output $x.Name) -Force
+            Get-FileHash -LiteralPath $x.FullName -Algorithm SHA256
+          }
+
+      - name: Upload only Admin.exe and Cashier.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-V11-EXE-only
+          path: |
+            exe-output/Admin.exe
+            exe-output/Cashier.exe
+          if-no-files-found: error
+          retention-days: 7
