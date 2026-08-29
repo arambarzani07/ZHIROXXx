@@ -1,0 +1,16 @@
+name: temp-v11-build
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-v11-build.yml'
+      - 'temp-v11-trigger.txt'
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Probe Windows runner
+        shell: pwsh
+        run: |
+          Write-Host 'V11 Windows runner OK'
+          [Environment]::OSVersion.VersionString
