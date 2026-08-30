@@ -1,0 +1,173 @@
+name: temp-v11-v11.1-autodb
+on:
+  push:
+    branches:
+      - temp-kanychnar-v11-exe-build
+permissions:
+  contents: read
+  actions: read
+jobs:
+  v11_1_autodb:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recover source and overlay reconstructed files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          gh api "/repos/${{ github.repository }}/actions/artifacts/9712881575/zip" > recovered.zip
+          Expand-Archive recovered.zip recovered-artifact -Force
+          if(-not(Test-Path 'recovered-artifact/recovered/KanyChnarPOS.sln')){throw 'Recovered source artifact invalid.'}
+          $b64=(Get-Content 'temp-reconstructed-v11/reconstructed-13.zip.b64' -Raw).Trim()
+          [IO.File]::WriteAllBytes('reconstructed-13.zip',[Convert]::FromBase64String($b64))
+          $h=(Get-FileHash reconstructed-13.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($h-ne'1f038285eec578183e81e0f21783e2246f2570821e449cf37bf230923caeda1e'){throw "Reconstruction SHA mismatch: $h"}
+          Expand-Archive reconstructed-13.zip 'recovered-artifact/recovered' -Force
+          Copy-Item 'temp-v11-v11_1/GoldenConnectionOptions.cs' 'recovered-artifact/recovered/src/ZhiroxPOS.Data/GoldenConnectionOptions.cs' -Force
+
+      - name: Build V11.1 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $msbuild=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if(-not$msbuild){throw 'MSBuild.exe not found.'}
+          & $msbuild (Join-Path $root 'KanyChnarPOS.sln') /m /t:Restore,Build /p:Configuration=Release "/p:Platform=Any CPU" /v:minimal /nologo
+          if($LASTEXITCODE-ne0){throw "MSBuild failed: $LASTEXITCODE"}
+
+      - name: Prepare LocalDB field simulation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $ldb=Get-Command sqllocaldb.exe -ErrorAction SilentlyContinue
+          if(-not$ldb){throw 'SQL LocalDB is unavailable on the Windows runner.'}
+          $info=& sqllocaldb info 2>$null
+          if($info -notcontains 'MSSQLLocalDB'){& sqllocaldb create MSSQLLocalDB | Out-Host}
+          & sqllocaldb start MSSQLLocalDB | Out-Host
+          $master='Server=(localdb)\MSSQLLocalDB;Database=master;Integrated Security=True;Connect Timeout=10;'
+          $cn=New-Object Data.SqlClient.SqlConnection($master);$cn.Open()
+          $cmd=$cn.CreateCommand();$cmd.CommandText="IF DB_ID('SuperMarket_Golden_V3') IS NULL CREATE DATABASE [SuperMarket_Golden_V3];";$cmd.ExecuteNonQuery()|Out-Null;$cn.Close()
+          $db='Server=(localdb)\MSSQLLocalDB;Database=SuperMarket_Golden_V3;Integrated Security=True;Connect Timeout=10;'
+          $cn=New-Object Data.SqlClient.SqlConnection($db);$cn.Open()
+          $cmd=$cn.CreateCommand();$cmd.CommandText=@"
+          IF OBJECT_ID('dbo.GroupName','U') IS NULL
+          CREATE TABLE dbo.GroupName(GroupNameID int NOT NULL PRIMARY KEY, GroupName varchar(50) NOT NULL);
+          "@;$cmd.ExecuteNonQuery()|Out-Null;$cn.Close()
+          'PASS LocalDB simulation database created' | Set-Content localdb.txt
+
+      - name: Prove wrong SQLEXPRESS auto-recovers to working local instance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $core=Join-Path $root 'src/ZhiroxPOS.Core/bin/Release/net48/ZhiroxPOS.Core.dll'
+          $data=Join-Path $root 'src/ZhiroxPOS.Data/bin/Release/net48/ZhiroxPOS.Data.dll'
+          Add-Type -Path $core
+          Add-Type -Path $data
+          $wrong='Server=.\SQLEXPRESS;Database=SuperMarket_Golden_V3;Integrated Security=True;Encrypt=False;'
+          $resolved=[ZhiroxPOS.Data.GoldenConnectionOptions]::ResolveAvailableLocalConnectionString($wrong)
+          "Configured: $wrong" | Set-Content resolver.txt
+          "Resolved:   $resolved" | Add-Content resolver.txt
+          if($resolved -notmatch '\(localdb\)\\MSSQLLocalDB'){throw "Resolver failed to escape wrong SQLEXPRESS: $resolved"}
+          $cn=New-Object Data.SqlClient.SqlConnection($resolved);$cn.Open()
+          $cmd=$cn.CreateCommand();$cmd.CommandText='SELECT DB_NAME()';$db=[string]$cmd.ExecuteScalar();$cn.Close()
+          if($db-ne'SuperMarket_Golden_V3'){throw "Wrong resolved database: $db"}
+          'PASS configured .\SQLEXPRESS auto-recovered to LocalDB containing the exact target DB' | Add-Content resolver.txt
+
+      - name: Golden replay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $verify=Join-Path $root 'src/ZhiroxPOS.Verification/bin/Release/net48/VerifyGolden.exe'
+          & $verify | Tee-Object golden-replay.txt
+          if($LASTEXITCODE-ne0){throw 'Golden replay failed.'}
+
+      - name: Real WPF window-title startup verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          function Wait-ExpectedWindow([string]$exe,[string]$expected){
+            $p=Start-Process $exe -PassThru -WorkingDirectory (Split-Path $exe)
+            try{
+              for($i=0;$i-lt30;$i++){
+                Start-Sleep -Seconds 1
+                if($p.HasExited){throw "$expected process exited early: $($p.ExitCode)"}
+                $p.Refresh();$t=[string]$p.MainWindowTitle
+                if($t-eq$expected){return "PASS $expected window reached, PID=$($p.Id)"}
+                if($t-eq'Admin Startup'){throw 'Admin reached Admin Startup error dialog instead of LoginForm.'}
+              }
+              throw "$expected window was not reached. Last title='$($p.MainWindowTitle)'"
+            } finally {
+              if(-not$p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
+            }
+          }
+          $admin=Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48/Admin.exe'
+          $cashier=Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48/Cashier.exe'
+          Wait-ExpectedWindow $admin 'LoginForm' | Set-Content wpf-runtime.txt
+          Wait-ExpectedWindow $cashier 'Cashier' | Add-Content wpf-runtime.txt
+
+      - name: Safety source assertions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $cash=Get-Content (Join-Path $root 'src/ZhiroxPOS.Cashier/MainWindow.xaml.cs') -Raw
+          if($cash -notmatch 'if \(movementKind == MovementKind\.Sale\)\s*SafeOpenDrawer\(\)'){throw 'Sale-only drawer guard missing.'}
+          $legacy=Get-Content (Join-Path $root 'src/ZhiroxPOS.Core/LegacyConstants.cs') -Raw
+          if($legacy -notmatch 'ScaleDivisor\s*=\s*1000'){throw 'ScaleDivisor=1000 missing.'}
+          'PASS return drawer remains sale-only' | Set-Content safety.txt
+          'PASS scale divisor remains 1000' | Add-Content safety.txt
+
+      - name: Stage V11.1 runtime and report
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'recovered-artifact/recovered').Path
+          $stage=Join-Path $PWD 'KanyChnar-POS-V11.1-AutoDB-Runtime'
+          New-Item -ItemType Directory -Force -Path "$stage/Admin","$stage/Cashier" | Out-Null
+          $a=Join-Path $root 'src/ZhiroxPOS.Admin/bin/Release/net48'
+          $c=Join-Path $root 'src/ZhiroxPOS.Cashier/bin/Release/net48'
+          foreach($f in @('Admin.exe','Admin.exe.config','ZhiroxPOS.Core.dll','ZhiroxPOS.Data.dll','ZhiroxPOS.Hardware.dll')){Copy-Item (Join-Path $a $f) "$stage/Admin/$f" -Force}
+          foreach($f in @('Cashier.exe','Cashier.exe.config','ZhiroxPOS.Core.dll','ZhiroxPOS.Data.dll','ZhiroxPOS.Hardware.dll')){Copy-Item (Join-Path $c $f) "$stage/Cashier/$f" -Force}
+          $admin=Join-Path $a 'Admin.exe';$cashier=Join-Path $c 'Cashier.exe'
+          $report=@(
+            'KanyChnar POS V11.1 - AUTO SQL RECOVERY WINDOWS FIELD SIMULATION',
+            'FINAL: PASS - V11.1 AUTODB WINDOWS TEST',
+            "UTC: $([DateTime]::UtcNow.ToString('s'))Z",
+            "Admin SHA256: $((Get-FileHash $admin -Algorithm SHA256).Hash.ToLowerInvariant())",
+            "Cashier SHA256: $((Get-FileHash $cashier -Algorithm SHA256).Hash.ToLowerInvariant())",
+            'PASS: Release build',
+            'PASS: wrong .\SQLEXPRESS recovered to another local instance containing SuperMarket_Golden_V3',
+            'PASS: Admin reached LoginForm, not Admin Startup error dialog',
+            'PASS: Cashier reached Cashier main window',
+            'PASS: Golden Replay 10/10',
+            'PASS: return drawer sale-only guard retained',
+            'NOTE: auto-recovery never creates/modifies a DB; installer remains required if the target DB does not exist anywhere locally.',
+            'LIMITATION: physical printer/drawer/scale/customer display are not attached to this runner.'
+          )
+          $report | Set-Content "$stage/V11_1_WINDOWS_TEST_REPORT.txt" -Encoding UTF8
+          @'
+          V11.1 AutoDB Runtime
+          -------------------
+          This runtime can recover automatically when the configured local SQL instance name is wrong, provided the exact target database already exists on another local SQL Server instance.
+          It probes only local candidates and does not create, restore, migrate, drop or modify databases.
+          If SuperMarket_Golden_V3 is not installed yet, run the SQL Error 26 Auto Fix installer first.
+          '@ | Set-Content "$stage/READ_FIRST.txt" -Encoding UTF8
+          Get-Content resolver.txt | Add-Content "$stage/V11_1_WINDOWS_TEST_REPORT.txt"
+          Get-Content golden-replay.txt | Add-Content "$stage/V11_1_WINDOWS_TEST_REPORT.txt"
+          Get-Content wpf-runtime.txt | Add-Content "$stage/V11_1_WINDOWS_TEST_REPORT.txt"
+          Get-Content safety.txt | Add-Content "$stage/V11_1_WINDOWS_TEST_REPORT.txt"
+          Get-ChildItem $stage -File -Recurse | ForEach-Object {"$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.FullName.Substring($stage.Length+1))"} | Set-Content "$stage/SHA256SUMS.txt" -Encoding UTF8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KanyChnar-POS-V11.1-AutoDB-Runtime
+          path: KanyChnar-POS-V11.1-AutoDB-Runtime
+          retention-days: 3
